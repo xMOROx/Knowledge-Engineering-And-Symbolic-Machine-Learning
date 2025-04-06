@@ -2,6 +2,10 @@
 
 set -e
 
+# --- Script Information ---
+SCRIPT_NAME=$(basename "$0")
+SCRIPT_VERSION="1.2.1" # Incremented version
+
 # --- Colors ---
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -10,474 +14,570 @@ BLUE='\033[0;34m'
 MAGENTA='\033[0;35m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+BOLD='\033[1m'
 
-# --- Log Prefixes ---
-SERVER_PREFIX="${CYAN}[SERVER]${NC}"
-TBOARD_PREFIX="${MAGENTA}[TBOARD]${NC}"
-ROBO_PREFIX_BASE="${BLUE}[ROBO"
-ERR_PREFIX="${RED}[ERROR]${NC}"
-WARN_PREFIX="${YELLOW}[WARN]${NC}"
-INFO_PREFIX="${GREEN}[INFO]${NC}"
-
-# --- Default Configuration ---
-DEFAULT_ROBOCODE_INSTANCES=1
-DEFAULT_ROBOCODE_HOME="${ROBOCODE_HOME:-$HOME/robocode}"
-DEFAULT_LOG_DIR="/tmp/plato_logs"
-DEFAULT_SERVER_IP="127.0.0.1"
-DEFAULT_LEARN_PORT=8000
-DEFAULT_WEIGHT_PORT=8001
-DEFAULT_ROBOCODE_TPS=150
-DEFAULT_SHOW_GUI="false"
-DEFAULT_TRAIN_ROUNDS=1000
+# --- Default Flags ---
+FLAG_CLEAN_LOGS=true
+FLAG_COMPILE_ROBOT=true
+FLAG_TAIL_LOGS=true
+VERBOSITY_LEVEL=1
 
 # --- Script Setup ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
 PROJECT_ROOT="${SCRIPT_DIR}"
-ROBOT_SRC_DIR="${PROJECT_ROOT}/plato-robot/src"
-ROBOT_BIN_DIR="${PROJECT_ROOT}/plato-robot/bin"
-ROBOT_LIBS_DIR="${PROJECT_ROOT}/plato-robot/libs"
-PROJECT_LIBS_DIR="${PROJECT_ROOT}/libs"
-SERVER_DIR="${PROJECT_ROOT}/plato-server"
-BATTLE_FILE="${PROJECT_ROOT}/train.battle"
+CONFIG_FILE="${PROJECT_ROOT}/config.yaml"
+GENERATED_BATTLE_FILE_NAME="plato_generated.battle"
 
-# --- Variables from Arguments ---
-N_INSTANCES="${DEFAULT_ROBOCODE_INSTANCES}"
-ROBOCODE_HOME="${DEFAULT_ROBOCODE_HOME}"
-LOG_DIR="${DEFAULT_LOG_DIR}"
-SERVER_IP="${DEFAULT_SERVER_IP}"
-LEARN_PORT="${DEFAULT_LEARN_PORT}"
-WEIGHT_PORT="${DEFAULT_WEIGHT_PORT}"
-ROBOCODE_TPS="${DEFAULT_ROBOCODE_TPS}"
-PYTHON_EXE="python3"
-SHOW_GUI="${DEFAULT_SHOW_GUI}"
-TRAIN_ROUNDS="${DEFAULT_TRAIN_ROUNDS}"
+# --- Helper Functions ---
+log() {
+  local level=$1
+  shift
+  local message=$@
+  local prefix="${SCRIPT_PREFIX}"
+  local color="${NC}"
+  local log_stdout=true
+  case $level in 0)
+    prefix="${SCRIPT_PREFIX} ${ERR_PREFIX}"
+    color="${RED}"
+    ;;
+  1)
+    prefix="${SCRIPT_PREFIX} ${WARN_PREFIX}"
+    color="${YELLOW}"
+    ;;
+  2)
+    prefix="${SCRIPT_PREFIX} ${INFO_PREFIX}"
+    color="${GREEN}"
+    ;;
+  3)
+    prefix="${SCRIPT_PREFIX} ${DEBUG_PREFIX}"
+    color="${CYAN}"
+    ;;
+  *) prefix="${SCRIPT_PREFIX}" ;; esac
+  if ((level > VERBOSITY_LEVEL + 1)); then return; fi
+  if ((level <= 1)); then echo -e "${color}${prefix} ${message}${NC}" >&2; else echo -e "${color}${prefix} ${message}${NC}"; fi
+}
+log_error() { log 0 "$@"; }
+log_warn() { log 1 "$@"; }
+log_info() { log 2 "$@"; }
+log_debug() { log 3 "$@"; }
 
-# --- Log Files ---
+check_command() { if ! command -v "$1" &>/dev/null; then
+  log_error "Required command '$1' not found."
+  exit 1
+fi; }
+
+# --- Usage Function ---
+usage() {
+  cat <<EOF
+${BOLD}Plato Robocode RL Training Script ${SCRIPT_VERSION}${NC}
+
+Usage: ${SCRIPT_NAME} [OPTIONS]
+
+Description:
+  Orchestrates compilation, server startup, Robocode instances,
+  and logging for training a Robocode bot using RL.
+  Configuration is primarily loaded from '${CONFIG_FILE}'.
+
+Options:
+  -c, --config FILE      Specify alternative configuration file path.
+                           (Default: '${CONFIG_FILE}')
+  -i, --instances N      Override number of Robocode instances from config.
+  -t, --tps N            Override Robocode TPS from config.
+  -l, --log-level LEVEL  Override Python server log level (DEBUG, INFO, etc.)
+  -r, --my-robot NAME    Override your robot name pattern (e.g., "lk.MyBot*").
+  -g, --gui              Override config to run Robocode WITH GUI (sets gui=true).
+  --no-gui               Override config to run Robocode WITHOUT GUI (sets gui=false).
+  --clean                Force cleaning of the log directory before starting.
+  --no-clean             Prevent cleaning of the log directory.
+  --compile              Force robot compilation (default).
+  --no-compile           Skip robot compilation step.
+  --tail                 Enable live log tailing (default).
+  --no-tail              Disable live log tailing.
+  -v, --verbose          Enable verbose script output (includes DEBUG logs).
+  -q, --quiet            Enable quiet mode (only errors and warnings).
+  -h, --help             Show this help message and exit.
+
+Configuration Variables (from ${CONFIG_FILE}, Keys are UPPER_SNAKE_CASE):
+  ROBOCODE_HOME, ROBOCODE_INSTANCES, ROBOCODE_TPS, ROBOCODE_GUI,
+  ROBOCODE_MY_ROBOT_NAME, ROBOCODE_OPPONENTS,
+  SERVER_IP, SERVER_LEARN_PORT, SERVER_WEIGHT_PORT, SERVER_PYTHON_EXE, SERVER_SCRIPT_NAME
+  LOGGING_LOG_DIR, LOGGING_PYTHON_LOG_LEVEL, TENSORBOARD_BIND_ALL
+  (Optional: PROJECT_PATHS_ROBOT_SRC_DIR etc.)
+EOF
+  exit 0
+}
+
+# --- Argument Parsing (using getopt) ---
+TEMP=$(getopt -o c:i:t:l:r:gvhq --long config:,instances:,tps:,log-level:,my-robot:,gui,no-gui,clean,no-clean,compile,no-compile,tail,no-tail,verbose,quiet,help -n "$SCRIPT_NAME" -- "$@")
+if [ $? != 0 ]; then
+  log_error "Terminating..." >&2
+  exit 1
+fi
+eval set -- "$TEMP"
+
+declare -A overrides
+
+while true; do
+  case "$1" in
+  -c | --config)
+    overrides[CONFIG_FILE]="$2"
+    shift 2
+    ;;
+  -i | --instances)
+    overrides[ROBOCODE_INSTANCES]="$2"
+    shift 2
+    ;;
+  -t | --tps)
+    overrides[ROBOCODE_TPS]="$2"
+    shift 2
+    ;;
+  -l | --log-level)
+    overrides[LOGGING_PYTHON_LOG_LEVEL]="$2"
+    shift 2
+    ;;
+  -r | --my-robot)
+    overrides[ROBOCODE_MY_ROBOT_NAME]="$2"
+    shift 2
+    ;;
+  -g | --gui)
+    overrides[ROBOCODE_GUI]="true"
+    shift
+    ;;
+  --no-gui)
+    overrides[ROBOCODE_GUI]="false"
+    shift
+    ;;
+  --clean)
+    FLAG_CLEAN_LOGS=true
+    shift
+    ;;
+  --no-clean)
+    FLAG_CLEAN_LOGS=false
+    shift
+    ;;
+  --compile)
+    FLAG_COMPILE_ROBOT=true
+    shift
+    ;;
+  --no-compile)
+    FLAG_COMPILE_ROBOT=false
+    shift
+    ;;
+  --tail)
+    FLAG_TAIL_LOGS=true
+    shift
+    ;;
+  --no-tail)
+    FLAG_TAIL_LOGS=false
+    shift
+    ;;
+  -v | --verbose)
+    VERBOSITY_LEVEL=2
+    shift
+    ;;
+  -q | --quiet)
+    VERBOSITY_LEVEL=0
+    shift
+    ;;
+  -h | --help) usage ;;
+  --)
+    shift
+    break
+    ;;
+  *) break ;;
+  esac
+done
+
+# --- Setup Logging Prefixes ---
+SCRIPT_PREFIX="${GREEN}[SCRIPT]${NC}"
+SERVER_PREFIX="${CYAN}[SERVER]${NC}"
+TBOARD_PREFIX="${MAGENTA}[TBOARD]${NC}"
+ROBO_PREFIX_BASE="${BLUE}[ROBO"
+ERR_PREFIX="${RED}ERROR:${NC}"
+WARN_PREFIX="${YELLOW}WARN:${NC}"
+INFO_PREFIX="INFO:"
+DEBUG_PREFIX="${CYAN}DEBUG:${NC}"
+
+# --- Load Configuration Function ---
+load_config() {
+  local config_path="${overrides[CONFIG_FILE]:-$CONFIG_FILE}"
+  log_info "Loading configuration from: ${config_path}"
+  if [ ! -f "${config_path}" ]; then
+    log_error "Config file not found: '${config_path}'"
+    exit 1
+  fi
+  local parser_script="${PROJECT_ROOT}/parse_config.py"
+  if [ ! -f "${parser_script}" ]; then
+    log_error "Parser script not found: '${parser_script}'"
+    exit 1
+  fi
+  check_command "python3"
+
+  if ! eval "$("python3" "${parser_script}" "${config_path}")"; then
+    log_error "Failed to parse config from ${config_path}"
+    exit 1
+  fi
+
+  for key in "${!overrides[@]}"; do
+    if [[ "$key" == "CONFIG_FILE" ]]; then continue; fi
+    local value="${overrides[$key]}"
+    log_info "Overriding config: ${key} = \"${value}\""
+    export "$key"="$value"
+  done
+
+  local errors=0
+  local critical_vars=("ROBOCODE_HOME" "ROBOCODE_INSTANCES" "ROBOCODE_TPS" "ROBOCODE_GUI"
+    "ROBOCODE_MY_ROBOT_NAME" "ROBOCODE_OPPONENTS" "SERVER_IP" "SERVER_LEARN_PORT"
+    "SERVER_WEIGHT_PORT" "SERVER_PYTHON_EXE" "LOGGING_LOG_DIR"
+    "LOGGING_PYTHON_LOG_LEVEL" "TENSORBOARD_BIND_ALL")
+  for var in "${critical_vars[@]}"; do
+    if [ -z "${!var}" ]; then
+      log_error "Critical config variable '${var}' is not defined."
+      errors=$((errors + 1))
+    fi
+  done
+  if ((errors > 0)); then exit 1; fi
+
+  if [ ! -d "${ROBOCODE_HOME}" ]; then
+    log_error "Robocode home dir not found: ${ROBOCODE_HOME}"
+    exit 1
+  fi
+  if [ ! -f "${ROBOCODE_HOME}/libs/robocode.jar" ]; then log_warn "Cannot verify robocode.jar in ${ROBOCODE_HOME}/libs/"; fi
+
+  log_info "Configuration loaded and validated."
+}
+
+# --- Generate Battle File Function ---
+generate_battle_file() {
+  local battle_file_path="$1"
+  read -r -a opponent_array <<<"$ROBOCODE_OPPONENTS"
+
+  log_info "Generating battle file: ${battle_file_path}"
+  log_info "My Robot: ${ROBOCODE_MY_ROBOT_NAME}"
+  log_info "Opponents: ${ROBOCODE_OPPONENTS}"
+
+  cat >"${battle_file_path}" <<EOF
+# Robocode Battle Specification generated by ${SCRIPT_NAME}
+robocode.battleField.width=800
+robocode.battleField.height=600
+robocode.battle.numRounds=100
+robocode.battle.gunCoolingRate=0.1
+robocode.battle.rules.inactivityTime=3000
+EOF
+  local opponent_list
+  opponent_list=$(printf ",%s" "${opponent_array[@]}")
+  opponent_list=${opponent_list:1}
+
+  if [ -z "$opponent_list" ]; then
+    log_error "No opponents specified!"
+    exit 1
+  fi
+  echo "robocode.battle.selectedRobots=${opponent_list},${ROBOCODE_MY_ROBOT_NAME}" >>"${battle_file_path}"
+  log_info "Battle file generated successfully."
+}
+
+# --- Cleanup Function ---
+cleanup() {
+  trap - SIGINT SIGTERM EXIT
+  log_warn "\n>>> Signal received. Cleaning up..."
+  local pids_to_kill="${SERVER_PID} ${TENSORBOARD_PID} ${ROBOCODE_PIDS[*]} ${LOG_TAIL_PIDS[*]}"
+  if [[ -n "${pids_to_kill// /}" ]]; then
+    log_warn "Sending SIGTERM to specific PIDs: ${pids_to_kill}..."
+    kill -SIGTERM ${pids_to_kill} &>/dev/null || true
+    sleep 0.5
+  fi
+  log_warn "Sending SIGTERM to process group $$..."
+  pkill -SIGTERM -g $$ || log_warn ">>> (Ignoring pkill SIGTERM error)"
+  sleep 1
+  log_warn "Sending SIGKILL to any remaining processes in group $$..."
+  pkill -SIGKILL -g $$ || log_warn ">>> (Ignoring pkill SIGKILL error)"
+  if [[ -n "$GENERATED_BATTLE_FILE_PATH" && -f "$GENERATED_BATTLE_FILE_PATH" ]]; then
+    log_info "Removing generated battle file: ${GENERATED_BATTLE_FILE_PATH}"
+    rm -f "$GENERATED_BATTLE_FILE_PATH"
+  fi
+  log_info ">>> Cleanup attempt complete."
+  exit 0
+}
+
+# --- Load Configuration ---
+load_config
+
+# --- Derived Variables ---
+LOG_DIR="${LOGGING_LOG_DIR}"
+GENERATED_BATTLE_FILE_PATH="${LOG_DIR}/${GENERATED_BATTLE_FILE_NAME}"
+
+# --- Derive Robot Class and Package Path ---
+MY_ROBOT_FULL_NAME_NO_STAR="${ROBOCODE_MY_ROBOT_NAME%\*}"
+MY_ROBOT_CLASS_NAME="${MY_ROBOT_FULL_NAME_NO_STAR##*.}"
+MY_ROBOT_CLASS_FILE="${MY_ROBOT_CLASS_NAME}.class"
+MY_ROBOT_PACKAGE_NAME="${MY_ROBOT_FULL_NAME_NO_STAR%.*}"
+if [[ "$MY_ROBOT_PACKAGE_NAME" == "$MY_ROBOT_CLASS_NAME" ]]; then
+  MY_ROBOT_PACKAGE_PATH=""
+  log_debug "Robot class '${MY_ROBOT_CLASS_NAME}' appears to be in the default package."
+else
+  MY_ROBOT_PACKAGE_PATH="${MY_ROBOT_PACKAGE_NAME//.//}"
+  log_debug "Derived package path: ${MY_ROBOT_PACKAGE_PATH}"
+fi
+# --- End Derive Robot ---
+
+ROBOT_SRC_DIR="${PROJECT_ROOT}/${PROJECT_PATHS_ROBOT_SRC_DIR:-plato-robot/src}"
+ROBOT_BIN_DIR="${PROJECT_ROOT}/${PROJECT_PATHS_ROBOT_BIN_DIR:-plato-robot/bin}"
+ROBOT_LIBS_DIR="${PROJECT_ROOT}/${PROJECT_PATHS_ROBOT_LIBS_DIR:-plato-robot/libs}"
+PROJECT_LIBS_DIR="${PROJECT_ROOT}/${PROJECT_PATHS_PROJECT_LIBS_DIR:-libs}"
+SERVER_DIR="${PROJECT_ROOT}/${PROJECT_PATHS_SERVER_DIR:-plato-server}"
+SERVER_SCRIPT_NAME="${SERVER_SCRIPT_NAME:-main.py}"
+
 SERVER_LOG="${LOG_DIR}/server.log"
 TENSORBOARD_LOG="${LOG_DIR}/tensorboard.log"
-
-# Store PIDs of background processes
 SERVER_PID=""
 TENSORBOARD_PID=""
 ROBOCODE_PIDS=()
 LOG_TAIL_PIDS=()
 
-# --- Helper Functions ---
-
-log_info() {
-  echo -e "${INFO_PREFIX} $@"
-}
-log_warn() {
-  echo -e "${WARN_PREFIX} $@" >&2
-}
-log_error() {
-  echo -e "${ERR_PREFIX} $@" >&2
-}
-
-usage() {
-  cat <<EOF
-Usage: $0 [OPTIONS]
-Options:
-  -n, --instances N     Number of Robocode instances (default: ${DEFAULT_ROBOCODE_INSTANCES})
-  -r, --robocode-home PATH Path to Robocode installation (default: ${DEFAULT_ROBOCODE_HOME})
-  --log-dir PATH        Directory for logs (default: ${DEFAULT_LOG_DIR})
-  --ip ADDRESS          Server IP (default: ${DEFAULT_SERVER_IP})
-  --learn-port PORT     Learning server port (default: ${DEFAULT_LEARN_PORT})
-  --weight-port PORT    Weight server port (default: ${DEFAULT_WEIGHT_PORT})
-  --tps N               Robocode TPS (default: ${DEFAULT_ROBOCODE_TPS})
-  --python-exe CMD      Python executable (default: python3)
-  --show-gui            Show Robocode GUI (default: ${DEFAULT_SHOW_GUI})
-  --train-rounds N      Number of rounds in train.battle (default: ${DEFAULT_TRAIN_ROUNDS})
-  -h, --help            Show this help message
-EOF
-  exit 1
-}
-
-check_command() {
-  if ! command -v "$1" &>/dev/null; then
-    log_error "Required command '$1' not found. Please install it."
-    exit 1
-  fi
-}
-
-cleanup() {
-  trap - SIGINT SIGTERM EXIT
-
-  log_warn "\n>>> Signal received. Cleaning up background processes..."
-
-  log_warn ">>> Sending SIGTERM to process group $$..."
-  pkill -SIGTERM -g $$ || log_warn ">>> (Ignoring pkill SIGTERM error - likely processes already gone)"
-
-  sleep 2
-
-  log_warn ">>> Sending SIGKILL to any remaining processes in group $$..."
-  pkill -SIGKILL -g $$ || log_warn ">>> (Ignoring pkill SIGKILL error - likely processes already gone)"
-
-  log_info ">>> Cleanup attempt complete."
-  exit 0
-}
-
+# --- Compile Robot Function ---
 compile_robot() {
-  log_info "Compiling Robocode robot..."
+  local expected_path_part=""
+  if [[ -n "$MY_ROBOT_PACKAGE_PATH" ]]; then expected_path_part="${MY_ROBOT_PACKAGE_PATH}/"; fi
+  local expected_file_raw="${ROBOT_BIN_DIR}/${expected_path_part}${MY_ROBOT_CLASS_FILE}"
+  local expected_file_normalized=$(echo "${expected_file_raw}" | tr -s '/')
 
-  local path_sep=":"
-
-  local compile_cp_parts=("${ROBOT_LIBS_DIR}/*" "${ROBOCODE_HOME}/libs/*")
-  if [[ -d "${PROJECT_LIBS_DIR}" && "$(ls -A ${PROJECT_LIBS_DIR})" ]]; then
-    compile_cp_parts+=("${PROJECT_LIBS_DIR}/*")
+  if ! ${FLAG_COMPILE_ROBOT}; then
+    log_info "Skipping robot compilation (--no-compile)."
+    # Check if bin dir and class file already exist
+    if [ ! -d "${ROBOT_BIN_DIR}" ]; then
+      log_error "Robot bin directory missing: ${ROBOT_BIN_DIR}"
+      exit 1
+    fi
+    if [ ! -f "${expected_file_normalized}" ]; then
+      log_error "Required robot class file missing: ${expected_file_normalized}"
+      exit 1
+    fi
+    log_info "Pre-compiled robot class file found."
+    return 0
   fi
+
+  log_info "Compiling Robocode robot: ${ROBOCODE_MY_ROBOT_NAME}"
+  local path_sep=":"
+  local javac_opts="-Xlint:deprecation -Xlint:unchecked"
+  local compile_cp_parts=("${ROBOT_LIBS_DIR}/*" "${ROBOCODE_HOME}/libs/*")
+  if [[ -d "${PROJECT_LIBS_DIR}" && "$(ls -A ${PROJECT_LIBS_DIR})" ]]; then compile_cp_parts+=("${PROJECT_LIBS_DIR}/*"); fi
   local compile_classpath=$(
     IFS=$path_sep
     echo "${compile_cp_parts[*]}"
   )
 
   mkdir -p "${ROBOT_BIN_DIR}"
+  log_debug "Compile CP Length: ${#compile_classpath}"
+  log_debug "Source Dir: ${ROBOT_SRC_DIR}, Output Dir: ${ROBOT_BIN_DIR}"
 
-  log_info "Compilation Classpath: ${compile_classpath}"
-  log_info "Source files: ${ROBOT_SRC_DIR}/lk/*.java"
-  log_info "Output directory: ${ROBOT_BIN_DIR}"
-
-  if ! javac -cp "${compile_classpath}" \
-    -Xlint:deprecation -Xlint:unchecked \
-    -d "${ROBOT_BIN_DIR}" \
-    "${ROBOT_SRC_DIR}"/lk/*.java; then
+  # Compile all java files recursively (adjust glob pattern if needed)
+  if ! find "${ROBOT_SRC_DIR}" -name '*.java' -print0 | xargs -0 javac -cp "${compile_classpath}" ${javac_opts} -d "${ROBOT_BIN_DIR}"; then
     log_error "Robot compilation failed."
     exit 1
   fi
 
-  if [ ! -f "${ROBOT_BIN_DIR}/lk/PlatoRobot.class" ]; then
-    log_error "Compiled class file not found at expected location: ${ROBOT_BIN_DIR}/lk/PlatoRobot.class"
-    ls -lR "${ROBOT_BIN_DIR}"
+  log_debug "Checking for compiled file at normalized path: ${expected_file_normalized}"
+  log_debug "(Raw components: BIN='${ROBOT_BIN_DIR}', PKG='${MY_ROBOT_PACKAGE_PATH}', CLASS='${MY_ROBOT_CLASS_FILE}')"
+
+  if [ ! -f "${expected_file_normalized}" ]; then
+    log_error "Compiled class file not found after compile: ${expected_file_normalized}"
+    log_error "Check ROBOT_BIN_DIR ('${ROBOT_BIN_DIR}') contents and package structure matches '${ROBOCODE_MY_ROBOT_NAME}'."
+    log_info "Listing contents of ROBOT_BIN_DIR:"
+    ls -lR "${ROBOT_BIN_DIR}" || log_warn "Could not list contents of ${ROBOT_BIN_DIR}"
     exit 1
   fi
-
-  log_info "Compilation complete. Class file verified."
+  log_info "Compilation complete and class file verified."
 }
 
+# --- Start Server Function ---
 start_server() {
   log_info "Starting Python server (Log: ${SERVER_LOG})..."
   cd "${SERVER_DIR}" || {
     log_error "Server directory not found: ${SERVER_DIR}"
     exit 1
   }
-
   export TF_CPP_MIN_LOG_LEVEL='2'
+  log_debug "Python: ${SERVER_PYTHON_EXE}, Script: ${SERVER_SCRIPT_NAME}, Level: ${LOGGING_PYTHON_LOG_LEVEL}"
 
-  local py_log_level="WARNING"
-
-  log_info "Setting Python log level to: ${py_log_level}"
-
-  "${PYTHON_EXE}" main.py \
-    --ip "${SERVER_IP}" \
-    --learn-port "${LEARN_PORT}" \
-    --weight-port "${WEIGHT_PORT}" \
-    --log-dir "${LOG_DIR}" \
-    --log-level "${py_log_level}" &>"${SERVER_LOG}" &
+  "${SERVER_PYTHON_EXE}" "${SERVER_SCRIPT_NAME}" \
+    --ip "${SERVER_IP}" --learn-port "${SERVER_LEARN_PORT}" --weight-port "${SERVER_WEIGHT_PORT}" \
+    --log-dir "${LOG_DIR}" --log-level "${LOGGING_PYTHON_LOG_LEVEL}" &>"${SERVER_LOG}" &
 
   SERVER_PID=$!
   cd "${PROJECT_ROOT}" || exit 1
-
-  sleep 1
+  sleep 2
   if ! ps -p $SERVER_PID >/dev/null; then
-    log_error "Python server failed to start or exited immediately. Check ${SERVER_LOG}"
+    log_error "Python server (PID ${SERVER_PID:-N/A}) failed. Check ${SERVER_LOG}"
     exit 1
   fi
   log_info "Python server started (PID: ${SERVER_PID})."
 }
 
+# --- Wait for Server Function ---
 wait_for_server() {
-  local ip=$1
-  local learn_p=$2
-  local weight_p=$3
-  local max_wait_seconds=60
-  local wait_interval=2
-
-  log_warn "Waiting for server ports (UDP:${learn_p}, TCP:${weight_p}) on ${ip}..."
-
+  local ip=$SERVER_IP
+  local learn_p=$SERVER_LEARN_PORT
+  local weight_p=$SERVER_WEIGHT_PORT
+  local max_wait=60
+  local interval=2
   local waited=0
+  log_warn "Waiting up to ${max_wait}s for server ports (UDP:${learn_p}, TCP:${weight_p}) on ${ip}..."
   while true; do
     local tcp_ok=1
     nc -z "${ip}" "${weight_p}" &>/dev/null && tcp_ok=$?
-
     local udp_ok=1
-
     nc -z -u -w 1 "${ip}" "${learn_p}" &>/dev/null && udp_ok=$?
-
     if [ $tcp_ok -eq 0 ] && [ $udp_ok -eq 0 ]; then
-      log_info "Server ports (UDP ${learn_p}, TCP ${weight_p}) are ready."
+      log_info "Server ports ready."
       return 0
     fi
-
-    if [ $waited -ge $max_wait_seconds ]; then
-      log_error "Timeout waiting for server ports after ${max_wait_seconds} seconds."
-      log_error "TCP Port ${weight_p} status: ${tcp_ok} (0=ready)"
-      log_error "UDP Port ${learn_p} status: ${udp_ok} (0=ready)"
+    if [ $waited -ge $max_wait ]; then
+      log_error "Timeout waiting for server ports."
+      log_error "TCP:${weight_p} status:${tcp_ok}"
+      log_error "UDP:${learn_p} status:${udp_ok}"
       log_error "Check server log: ${SERVER_LOG}"
       return 1
     fi
-
-    sleep "${wait_interval}"
-    waited=$((waited + wait_interval))
-
-    if ((waited % (wait_interval * 3) == 0)); then
-      log_warn "Still waiting for server ports... (${waited}s / ${max_wait_seconds}s)"
-    fi
+    sleep "${interval}"
+    waited=$((waited + interval))
+    if ((waited % (interval * 5) == 0)); then log_warn "Still waiting... (${waited}s)"; fi
   done
 }
 
+# --- Start Robocode Instance Function ---
 start_robocode_instance() {
   local instance_id=$1
   local instance_log="${LOG_DIR}/robocode_${instance_id}.log"
   log_info "Starting Robocode instance ${instance_id} (Log: ${instance_log})..."
-
-  local robocode_robot_path="${ROBOCODE_HOME}/robots"
   local path_sep=":"
-
+  local robocode_robot_path="${ROBOCODE_HOME}/robots"
   if [ ! -d "${ROBOT_BIN_DIR}" ]; then
-    log_error "Robot binary directory (${ROBOT_BIN_DIR}) does not exist before starting Robocode."
+    log_error "Robot bin dir (${ROBOT_BIN_DIR}) missing."
     exit 1
   fi
-  log_info "Verified Robot Binary Directory: ${ROBOT_BIN_DIR}"
 
   local cp_parts=("${ROBOT_BIN_DIR}" "${ROBOT_LIBS_DIR}/*" "${ROBOCODE_HOME}/libs/*")
-  if [[ -d "${PROJECT_LIBS_DIR}" && "$(ls -A ${PROJECT_LIBS_DIR})" ]]; then
-    cp_parts+=("${PROJECT_LIBS_DIR}/*")
-  fi
-
+  if [[ -d "${PROJECT_LIBS_DIR}" && "$(ls -A ${PROJECT_LIBS_DIR})" ]]; then cp_parts+=("${PROJECT_LIBS_DIR}/*"); fi
   local robocode_classpath=$(
     IFS=$path_sep
     echo "${cp_parts[*]}"
   )
-
-  log_info "Robocode Instance ${instance_id} Standard ROBOTPATH: ${robocode_robot_path}"
-  log_info "Robocode Instance ${instance_id} Development Path: ${ROBOT_BIN_DIR}"
-  log_info "Robocode Instance ${instance_id} Java Classpath: ${robocode_classpath}"
-
-  local robocode_cmd=(
-    java -Xmx512M
-    --add-opens java.base/sun.net.www.protocol.jar=ALL-UNNAMED
-    --add-exports java.desktop/sun.awt=ALL-UNNAMED
-    -Dsun.io.useCanonCaches=false
-    -Ddebug=true
-    -DNOSECURITY=true
-    -Drobocode.home="${ROBOCODE_HOME}"
-    -DROBOTPATH="${robocode_robot_path}"
-    -Drobocode.development.path="${ROBOT_BIN_DIR}"
-    -Dfile.encoding=UTF-8
-    -cp "${robocode_classpath}"
-    robocode.Robocode
-    -battle "${BATTLE_FILE}"
-    -tps "${ROBOCODE_TPS}"
-  )
-
-  if [ "${SHOW_GUI}" = "false" ]; then
-    robocode_cmd+=("-nodisplay")
-    log_info "Robocode Instance ${instance_id} running HEADLESS (-nodisplay)."
-  else
-    log_info "Robocode Instance ${instance_id} running WITH GUI."
+  local current_battle_file="${GENERATED_BATTLE_FILE_PATH}"
+  if [ ! -f "${current_battle_file}" ]; then
+    log_error "Generated battle file not found: ${current_battle_file}"
+    exit 1
   fi
+
+  local robocode_cmd=(java -Xmx512M
+    --add-opens java.base/sun.net.www.protocol.jar=ALL-UNNAMED --add-exports java.desktop/sun.awt=ALL-UNNAMED
+    -Dsun.io.useCanonCaches=false -Ddebug=true -DNOSECURITY=true -Drobocode.home="${ROBOCODE_HOME}"
+    -DROBOTPATH="${robocode_robot_path}" -Drobocode.development.path="${ROBOT_BIN_DIR}" -Dfile.encoding=UTF-8
+    -cp "${robocode_classpath}" robocode.Robocode -battle "${current_battle_file}" -tps "${ROBOCODE_TPS}")
+  if [ "${ROBOCODE_GUI}" = "false" ]; then robocode_cmd+=("-nodisplay"); else log_info "Instance ${instance_id} running WITH GUI."; fi
 
   "${robocode_cmd[@]}" &>"${instance_log}" &
   local pid=$!
   ROBOCODE_PIDS+=("$pid")
-
-  sleep 1
+  sleep 0.5
   if ! ps -p $pid >/dev/null; then
-    log_error "Robocode instance ${instance_id} failed to start or exited immediately. Check ${instance_log}"
-
-  else
-    log_info "Robocode instance ${instance_id} started (PID: ${pid})."
-  fi
+    log_error "Robocode instance ${instance_id} (PID ${pid:-N/A}) failed. Check ${instance_log}"
+  else log_info "Robocode instance ${instance_id} started (PID: ${pid})."; fi
 }
 
+# --- Tail Log Function ---
 tail_log() {
   local log_file="$1"
   local prefix="$2"
-
-  tail -F --retry "$log_file" 2>/dev/null | while IFS= read -r line; do
-
-    if [[ -n "${line// /}" ]]; then
-      echo -e "${prefix} ${line}"
-    fi
-  done &
+  if ! ${FLAG_TAIL_LOGS}; then return 0; fi
+  tail -F --pid=$$ --retry "$log_file" 2>/dev/null | while IFS= read -r line; do if [[ -n "${line// /}" ]]; then echo -e "${prefix} ${line}"; fi; done &
   LOG_TAIL_PIDS+=("$!")
 }
 
-# --- Argument Parsing ---
-while [[ $# -gt 0 ]]; do
-  key="$1"
-  case $key in
-  -n | --instances)
-    N_INSTANCES="$2"
-    shift
-    shift
-    ;;
-  -r | --robocode-home)
-    ROBOCODE_HOME="$2"
-    shift
-    shift
-    ;;
-  --log-dir)
-    LOG_DIR="$2"
-    shift
-    shift
-    ;;
-  --ip)
-    SERVER_IP="$2"
-    shift
-    shift
-    ;;
-  --learn-port)
-    LEARN_PORT="$2"
-    shift
-    shift
-    ;;
-  --weight-port)
-    WEIGHT_PORT="$2"
-    shift
-    shift
-    ;;
-  --tps)
-    ROBOCODE_TPS="$2"
-    shift
-    shift
-    ;;
-  --python-exe)
-    PYTHON_EXE="$2"
-    shift
-    shift
-    ;;
-  --show-gui)
-    SHOW_GUI="true"
-    shift
-    ;;
-  --train-rounds)
-    TRAIN_ROUNDS="$2"
-    shift
-    shift
-    ;;
-  -h | --help) usage ;;
-  *)
-    log_error "Unknown option: $1"
-    usage
-    ;;
-  esac
-done
-
+# --- Sanity Checks ---
 log_info "Performing sanity checks..."
 check_command "java"
-check_command "${PYTHON_EXE}"
+check_command "${SERVER_PYTHON_EXE}"
 check_command "tensorboard"
 check_command "javac"
 check_command "nc"
 check_command "pkill"
 check_command "tail"
-check_command "sed" # Check for sed command
-
-if [ ! -d "${ROBOCODE_HOME}" ]; then
-  log_error "Robocode home directory not found: ${ROBOCODE_HOME}"
-  exit 1
-fi
-if [ ! -f "${ROBOCODE_HOME}/libs/robocode.jar" ]; then log_warn "Cannot verify robocode.jar in ${ROBOCODE_HOME}/libs/"; fi
-if [ ! -d "${ROBOT_SRC_DIR}" ]; then
-  log_error "Robot source directory not found: ${ROBOT_SRC_DIR}"
-  exit 1
-fi
-if [ ! -d "${SERVER_DIR}" ]; then
-  log_error "Server directory not found: ${SERVER_DIR}"
-  exit 1
-fi
-if [ ! -f "${BATTLE_FILE}" ]; then
-  log_error "Battle file not found: ${BATTLE_FILE}"
-  exit 1
-fi
+check_command "python3"
+check_command "basename"
+check_command "dirname"
+check_command "sed"
+check_command "tr"
+check_command "find"
+check_command "xargs" # Added checks
 log_info "Sanity checks passed."
 
 # --- Main Execution ---
-
 trap cleanup SIGINT SIGTERM EXIT
 
-log_info ">>> Starting Training Setup <<<"
-echo "---------------------------------"
-echo "Number of Robocode Instances: ${N_INSTANCES}"
-echo "Robocode Home: ${ROBOCODE_HOME}"
-echo "Log Directory: ${LOG_DIR}"
-echo "Server IP: ${SERVER_IP}"
-echo "Learn Port: ${LEARN_PORT}"
-echo "Weight Port: ${WEIGHT_PORT}"
-echo "Robocode TPS: ${ROBOCODE_TPS}"
-echo "Show GUI: ${SHOW_GUI}"
-echo "Python Executable: ${PYTHON_EXE}"
-echo "Train Rounds: ${TRAIN_ROUNDS}"
-echo "Project Root: ${PROJECT_ROOT}"
-echo "---------------------------------"
+log_info "${BOLD}>>> Starting Plato Training Setup <<<${NC}"
+echo "--- Configuration Summary ---"
+echo " My Robot:               ${ROBOCODE_MY_ROBOT_NAME}"
+echo " Robocode Instances:     ${ROBOCODE_INSTANCES}"
+echo " Robocode TPS:           ${ROBOCODE_TPS}"
+echo " Robocode GUI:           ${ROBOCODE_GUI}"
+echo " Opponents:              ${ROBOCODE_OPPONENTS}"
+echo " Python Log Level:       ${LOGGING_PYTHON_LOG_LEVEL}"
+echo " Log Directory:          ${LOG_DIR}"
+echo " Clean Logs on Start:    ${FLAG_CLEAN_LOGS}"
+echo " Compile Robot:          ${FLAG_COMPILE_ROBOT}"
+echo " Tail Logs:              ${FLAG_TAIL_LOGS}"
+echo " Script Verbosity:       ${VERBOSITY_LEVEL}"
+echo "---------------------------"
 
-log_info "Preparing log directory: ${LOG_DIR}"
-rm -rf "${LOG_DIR}"
+if ${FLAG_CLEAN_LOGS}; then
+  log_info "Cleaning log directory: ${LOG_DIR}"
+  rm -rf "${LOG_DIR}"
+fi
 mkdir -p "${LOG_DIR}"
 
+generate_battle_file "${GENERATED_BATTLE_FILE_PATH}"
 compile_robot
 
-# --- Modify train.battle file ---
-log_info "Setting train rounds in ${BATTLE_FILE} to ${TRAIN_ROUNDS}..."
-if ! sed -i.bak "s/^robocode\.battle\.numRounds=.*/robocode.battle.numRounds=${TRAIN_ROUNDS}/" "${BATTLE_FILE}"; then
-  log_error "Failed to update rounds in ${BATTLE_FILE} using sed."
-  exit 1
-else
-  log_info "Successfully updated rounds in ${BATTLE_FILE}."
-  rm -f "${BATTLE_FILE}.bak"
-fi
-# --- End Modify train.battle file ---
-
 log_info "Starting TensorBoard (Log: ${TENSORBOARD_LOG})..."
-tensorboard --logdir="${LOG_DIR}" --bind_all &>"${TENSORBOARD_LOG}" &
+tensorboard_opts=("--logdir=${LOG_DIR}")
+if [ "${TENSORBOARD_BIND_ALL}" = "true" ]; then tensorboard_opts+=("--bind_all"); fi
+tensorboard "${tensorboard_opts[@]}" &>"${TENSORBOARD_LOG}" &
 TENSORBOARD_PID=$!
 sleep 2
+if ! ps -p $TENSORBOARD_PID >/dev/null; then log_warn "TensorBoard (PID ${TENSORBOARD_PID:-N/A}) failed. Check ${TENSORBOARD_LOG}"; fi
 
 start_server
-
-wait_for_server "${SERVER_IP}" "${LEARN_PORT}" "${WEIGHT_PORT}" || {
+wait_for_server || {
   log_error "Server failed to become ready, exiting."
-
   exit 1
 }
 
-for i in $(seq 1 "${N_INSTANCES}"); do
+for i in $(seq 1 "${ROBOCODE_INSTANCES}"); do
   start_robocode_instance "$i"
-  sleep 0.5
+  sleep 0.2
 done
 
+if [[ ${#ROBOCODE_PIDS[@]} -ne ${ROBOCODE_INSTANCES} ]]; then log_warn "Some Robocode instances may not have started. Check logs."; fi
+
 echo "---------------------------------"
-log_info ">>> Setup complete. Tailing logs... <<<"
+log_info "${BOLD}>>> Setup complete. Training is running. <<<${NC}"
+if ${FLAG_TAIL_LOGS}; then log_info "Tailing logs to console..."; fi
 log_warn ">>> Press Ctrl+C to stop all processes. <<<"
 echo "---------------------------------"
 
-# --- Start Tailing Logs ---
-
-sleep 1
-
-if [ -f "$SERVER_LOG" ]; then
-  tail_log "$SERVER_LOG" "$SERVER_PREFIX"
-else
-  log_warn "Server log file $SERVER_LOG not found for tailing."
+if ${FLAG_TAIL_LOGS}; then
+  sleep 0.5
+  if [ -f "$SERVER_LOG" ]; then tail_log "$SERVER_LOG" "$SERVER_PREFIX"; else log_warn "Log not found: $SERVER_LOG"; fi
+  if [ -f "$TENSORBOARD_LOG" ]; then tail_log "$TENSORBOARD_LOG" "$TBOARD_PREFIX"; else log_warn "Log not found: $TENSORBOARD_LOG"; fi
+  for i in $(seq 1 "${ROBOCODE_INSTANCES}"); do
+    instance_log="${LOG_DIR}/robocode_${i}.log"
+    if [ -f "$instance_log" ]; then
+      robo_prefix="${ROBO_PREFIX_BASE}${i}]${NC}"
+      tail_log "$instance_log" "$robo_prefix"
+    else log_warn "Log not found: $instance_log"; fi
+  done
 fi
 
-if [ -f "$TENSORBOARD_LOG" ]; then
-  tail_log "$TENSORBOARD_LOG" "$TBOARD_PREFIX"
-else
-  log_warn "TensorBoard log file $TENSORBOARD_LOG not found for tailing."
-fi
-
-for i in $(seq 1 "${N_INSTANCES}"); do
-  instance_log="${LOG_DIR}/robocode_${i}.log"
-  if [ -f "$instance_log" ]; then
-    robo_prefix="${ROBO_PREFIX_BASE}${i}]${NC}"
-    tail_log "$instance_log" "$robo_prefix"
-  else
-    log_warn "Robocode instance $i log file $instance_log not found for tailing."
-  fi
-done
-
-wait ${SERVER_PID} ${TENSORBOARD_PID} ${ROBOCODE_PIDS[@]}
-
-log_info ">>> Main processes terminated. Script exiting. <<<"
+log_info "Waiting for background processes to complete..."
+wait
+log_info ">>> Main processes terminated (or script interrupted). Script exiting. <<<"
