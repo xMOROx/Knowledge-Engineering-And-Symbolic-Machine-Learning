@@ -4,13 +4,13 @@ set -e
 
 # --- Script Information ---
 SCRIPT_NAME=$(basename "$0")
-SCRIPT_VERSION="1.2.1"
+SCRIPT_VERSION="1.3.0"
 
 # --- Default Flags ---
 FLAG_CLEAN_LOGS=true
 FLAG_COMPILE_ROBOT=true
 FLAG_TAIL_LOGS=true
-VERBOSITY_LEVEL=1 # 0=quiet, 1=normal, 2=verbose
+VERBOSITY_LEVEL=1
 
 # --- Script Setup ---
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" &>/dev/null && pwd)"
@@ -43,11 +43,13 @@ if ! source "${LIB_DIR}/tasks.sh"; then
   exit 1
 fi
 
+# --- Global Variables ---
 SCRIPT_PREFIX="${GREEN}[SCRIPT]${NC}"
 SERVER_PID=""
 TENSORBOARD_PID=""
 ROBOCODE_PIDS=()
 LOG_TAIL_PIDS=()
+GENERATED_BATTLE_FILE_PATH=""
 
 # --- Usage Function ---
 usage() {
@@ -61,6 +63,11 @@ Options:
   -t, --tps N            Override Robocode TPS.
   -l, --log-level LEVEL  Override Python log level (DEBUG, INFO, etc.)
   -r, --my-robot NAME    Override your robot name pattern.
+  --rounds N             Override number of rounds per battle.
+  --width W              Override battlefield width.
+  --height H             Override battlefield height.
+  --cooling RATE         Override gun cooling rate.
+  --inactivity TICKS     Override inactivity time ticks.
   -g, --gui              Override config to run WITH GUI.
   --no-gui               Override config to run WITHOUT GUI.
   --clean                Force cleaning log directory (default).
@@ -71,12 +78,22 @@ Options:
   --no-tail              Disable live log tailing.
   -v, --verbose          Enable verbose script output (DEBUG logs).
   -q, --quiet            Enable quiet mode (errors/warnings only).
-  -h, --help             Show this help message.
+  -h, --help             Show this help message and exit.
+Configuration Variables (from ${CONFIG_FILE}, Keys are UPPER_SNAKE_CASE):
+  ROBOCODE_HOME, ROBOCODE_INSTANCES, ROBOCODE_TPS, ROBOCODE_GUI, ROBOCODE_MY_ROBOT_NAME,
+  ROBOCODE_OPPONENTS, ROBOCODE_NUM_ROUNDS, ROBOCODE_INACTIVITY_TIME, ROBOCODE_GUN_COOLING_RATE,
+  ROBOCODE_BATTLEFIELD_WIDTH, ROBOCODE_BATTLEFIELD_HEIGHT,
+  SERVER_IP, SERVER_LEARN_PORT, SERVER_WEIGHT_PORT, SERVER_PYTHON_EXE, SERVER_SCRIPT_NAME
+  LOGGING_LOG_DIR, LOGGING_PYTHON_LOG_LEVEL, TENSORBOARD_BIND_ALL
 EOF
   exit 0
 }
 
-TEMP=$(getopt -o c:i:t:l:r:gvhq --long config:,instances:,tps:,log-level:,my-robot:,gui,no-gui,clean,no-clean,compile,no-compile,tail,no-tail,verbose,quiet,help -n "$SCRIPT_NAME" -- "$@")
+# --- Argument Parsing ---
+
+TEMP=$(getopt -o c:i:t:l:r:gvhq \
+  --long config:,instances:,tps:,log-level:,my-robot:,rounds:,width:,height:,cooling:,inactivity:,gui,no-gui,clean,no-clean,compile,no-compile,tail,no-tail,verbose,quiet,help \
+  -n "$SCRIPT_NAME" -- "$@")
 if [ $? != 0 ]; then
   log_error "Terminating..." >&2
   exit 1
@@ -105,6 +122,26 @@ while true; do
     ;;
   -r | --my-robot)
     cmd_overrides[ROBOCODE_MY_ROBOT_NAME]="$2"
+    shift 2
+    ;;
+  --rounds)
+    cmd_overrides[ROBOCODE_NUM_ROUNDS]="$2"
+    shift 2
+    ;;
+  --width)
+    cmd_overrides[ROBOCODE_BATTLEFIELD_WIDTH]="$2"
+    shift 2
+    ;;
+  --height)
+    cmd_overrides[ROBOCODE_BATTLEFIELD_HEIGHT]="$2"
+    shift 2
+    ;;
+  --cooling)
+    cmd_overrides[ROBOCODE_GUN_COOLING_RATE]="$2"
+    shift 2
+    ;;
+  --inactivity)
+    cmd_overrides[ROBOCODE_INACTIVITY_TIME]="$2"
     shift 2
     ;;
   -g | --gui)
@@ -159,8 +196,10 @@ while true; do
   esac
 done
 
+# --- Load Configuration ---
 load_config "${CONFIG_FILE}" "${PARSER_SCRIPT}" cmd_overrides
 
+# --- Set Derived Variables ---
 LOG_DIR="${LOGGING_LOG_DIR}"
 GENERATED_BATTLE_FILE_PATH="${LOG_DIR}/${GENERATED_BATTLE_FILE_NAME}"
 
@@ -180,6 +219,7 @@ SERVER_SCRIPT_NAME="${SERVER_SCRIPT_NAME:-main.py}"
 SERVER_LOG="${LOG_DIR}/server.log"
 TENSORBOARD_LOG="${LOG_DIR}/tensorboard.log"
 
+# --- Sanity Checks ---
 log_info "Performing sanity checks..."
 check_command "java"
 check_command "${SERVER_PYTHON_EXE}"
@@ -197,6 +237,7 @@ check_command "find"
 check_command "xargs"
 log_info "Sanity checks passed."
 
+# --- Main Execution ---
 trap cleanup SIGINT SIGTERM EXIT
 
 log_info "${BOLD}>>> Starting Plato Training Setup <<<${NC}"
@@ -206,6 +247,10 @@ echo " Robocode Instances:     ${ROBOCODE_INSTANCES}"
 echo " Robocode TPS:           ${ROBOCODE_TPS}"
 echo " Robocode GUI:           ${ROBOCODE_GUI}"
 echo " Opponents:              ${ROBOCODE_OPPONENTS}"
+echo " Battle Rounds:          ${ROBOCODE_NUM_ROUNDS}"
+echo " Battle Dimensions:      ${ROBOCODE_BATTLEFIELD_WIDTH}x${ROBOCODE_BATTLEFIELD_HEIGHT}"
+echo " Gun Cooling Rate:       ${ROBOCODE_GUN_COOLING_RATE}"
+echo " Inactivity Time:        ${ROBOCODE_INACTIVITY_TIME}"
 echo " Python Log Level:       ${LOGGING_PYTHON_LOG_LEVEL}"
 echo " Log Directory:          ${LOG_DIR}"
 echo " Clean Logs on Start:    ${FLAG_CLEAN_LOGS}"
@@ -224,12 +269,11 @@ mkdir -p "${LOG_DIR}" || {
 }
 
 if ! generate_battle_file "${GENERATED_BATTLE_FILE_PATH}"; then
-  log_error "Failed to generate battle file. Exiting."
+  log_error "Failed to generate battle file."
   exit 1
 fi
-
 if ! compile_robot; then
-  log_error "Robot compilation failed or class file missing. Exiting."
+  log_error "Robot compilation failed or class missing."
   exit 1
 fi
 
@@ -240,34 +284,29 @@ tensorboard "${tensorboard_opts[@]}" &>"${TENSORBOARD_LOG}" &
 TENSORBOARD_PID=$!
 sleep 2
 if ! ps -p $TENSORBOARD_PID >/dev/null; then
-  log_warn "TensorBoard (PID ${TENSORBOARD_PID:-N/A}) failed. Check ${TENSORBOARD_LOG}"
+  log_warn "TensorBoard (PID ${TENSORBOARD_PID:-N/A}) failed."
   TENSORBOARD_PID=""
 fi
 
 if ! start_server; then
-  log_error "Failed to start Python server. Exiting."
+  log_error "Failed to start Python server."
   exit 1
 fi
-
 if ! wait_for_server; then
-  log_error "Server failed to become ready. Exiting."
+  log_error "Server failed to become ready."
   exit 1
 fi
 
 log_info "Starting ${ROBOCODE_INSTANCES} Robocode instance(s)..."
 declare -i robocode_start_failures=0
 for i in $(seq 1 "${ROBOCODE_INSTANCES}"); do
-  if ! start_robocode_instance "$i"; then
-    robocode_start_failures=$((robocode_start_failures + 1))
-  fi
+  if ! start_robocode_instance "$i"; then robocode_start_failures=$((robocode_start_failures + 1)); fi
   sleep 0.2
 done
-
 if ((robocode_start_failures > 0)); then
-  log_warn "${robocode_start_failures} Robocode instance(s) failed to start. Check logs."
-
+  log_warn "${robocode_start_failures} Robocode instance(s) failed."
   if [[ ${#ROBOCODE_PIDS[@]} -eq 0 ]]; then
-    log_error "All Robocode instances failed to start. Exiting."
+    log_error "All Robocode instances failed."
     exit 1
   fi
 fi
@@ -286,22 +325,16 @@ if ${FLAG_TAIL_LOGS}; then
       tail_log "$instance_log" "$robo_prefix"
     else log_warn "Log not found: $instance_log"; fi
   done
-else
-  log_info "Log tailing disabled (--no-tail)."
-fi
+else log_info "Log tailing disabled (--no-tail)."; fi
 log_warn ">>> Press Ctrl+C to stop all processes. <<<"
 echo "---------------------------------"
 
 log_info "Waiting for background processes..."
-
 wait_pids=()
 [[ -n "$SERVER_PID" ]] && wait_pids+=("$SERVER_PID")
 [[ ${#ROBOCODE_PIDS[@]} -gt 0 ]] && wait_pids+=("${ROBOCODE_PIDS[@]}")
 if [[ ${#wait_pids[@]} -gt 0 ]]; then
-  wait "${wait_pids[@]}" || log_warn "Wait command exited with non-zero status (likely due to signal)."
-else
-  log_warn "No primary processes to wait for specifically."
-
-fi
+  wait "${wait_pids[@]}" || log_warn "Wait command exited status $? (likely due to signal)."
+else log_warn "No primary processes to wait for specifically."; fi
 
 log_info ">>> Main processes terminated (or script interrupted). Script exiting. <<<"

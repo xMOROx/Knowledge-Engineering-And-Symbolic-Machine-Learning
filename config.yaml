@@ -6,6 +6,12 @@ robocode:
   battle_file: "train.battle"
   my_robot_name: "lk.PlatoRobot*"
   opponents: ["sample.SittingDuck"]
+  # --- Battle Parameters ---
+  num_rounds: 1000 # Number of rounds per battle
+  inactivity_time: 3000 # Ticks before inactivity timeout
+  gun_cooling_rate: 0.1 # Gun cooling rate
+  battlefield_width: 800 # Battlefield width in pixels
+  battlefield_height: 600 # Battlefield height in pixels
 
 server:
   ip: "127.0.0.1"
