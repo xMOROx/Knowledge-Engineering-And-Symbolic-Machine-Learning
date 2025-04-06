@@ -1,0 +1,31 @@
+robocode:
+  home: "/home/patryk/robocode"
+  instances: 1
+  tps: 150
+  gui: false
+  battle_file: "train.battle"
+  my_robot_name: "lk.PlatoRobot*"
+  opponents: ["sample.SittingDuck"]
+
+server:
+  ip: "127.0.0.1"
+  learn_port: 8000
+  weight_port: 8001
+  python_exe: "python3"
+  script_name: "main.py"
+
+logging:
+  log_dir: "/tmp/plato_logs"
+  # (DEBUG, INFO, WARNING, ERROR, CRITICAL)
+  python_log_level: "INFO"
+
+tensorboard:
+  # Bind TensorBoard to all interfaces (true) or just localhost (false)
+  bind_all: false
+
+project_paths:
+  robot_src_dir: "plato-robot/src"
+  robot_bin_dir: "plato-robot/bin"
+  robot_libs_dir: "plato-robot/libs"
+  project_libs_dir: "libs"
+  server_dir: "plato-server"
