@@ -17,13 +17,12 @@ class ColoredFormatter(logging.Formatter):
         logging.ERROR: colorama.Fore.RED,
         logging.CRITICAL: colorama.Fore.MAGENTA + colorama.Style.BRIGHT,
     }
-    RESET_CODE = colorama.Style.RESET_ALL
 
     def __init__(self, fmt=None, datefmt=None, style="%", use_color=True):
         super().__init__(fmt, datefmt, style)
         self.use_color = use_color
         if self.use_color:
-            colorama.init(autoreset=True)
+            colorama.init(autoreset=True, strip=False)
 
     def format(self, record):
         if not hasattr(record, "name"):
@@ -48,12 +47,12 @@ def setup_logging(level_str="INFO"):
         "ERROR": logging.ERROR,
         "CRITICAL": logging.CRITICAL,
     }
-    numeric_level = log_level_map.get(level_str, logging.INFO)
+    numeric_level = log_level_map.get(level_str.upper(), logging.INFO)
 
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
 
-    handler = logging.StreamHandler()
+    handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
@@ -74,99 +73,71 @@ def main():
 
     parser.add_argument(
         "--log-level",
+        type=str.upper,
         default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"],
-        help="Set the logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL). Default: INFO",
-    )
-
-    parser.add_argument(
-        "--state-dims",
-        type=int,
-        default=8,
-        help="Number of dimensions in the state space.",
+        help="Set the logging level. Default: INFO",
     )
     parser.add_argument(
-        "--actions", type=int, default=6, help="Number of possible actions."
+        "--state-dims", type=int, default=8, help="State space dimensions."
     )
+    parser.add_argument("--actions", type=int, default=6, help="Number of actions.")
     parser.add_argument(
-        "--hidden-dims",
-        type=int,
-        default=32,
-        help="Number of dimensions in the hidden layers.",
+        "--hidden-dims", type=int, default=32, help="Hidden layer dimensions."
     )
     parser.add_argument(
         "--learning-rate",
         type=float,
         default=1e-4,
         dest="lr",
-        help="Learning rate for the Adam optimizer.",
+        help="Optimizer learning rate.",
+    )
+    parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
+    parser.add_argument(
+        "--batch-size", type=int, default=32, help="Training batch size."
+    )
+    parser.add_argument("--ip", default="127.0.0.1", help="Server bind IP.")
+    parser.add_argument(
+        "--learn-port", type=int, default=8000, help="Learning server UDP port."
     )
     parser.add_argument(
-        "--gamma", type=float, default=0.99, help="Discount factor for future rewards."
-    )
-    parser.add_argument(
-        "--batch-size", type=int, default=32, help="Batch size for training updates."
-    )
-    parser.add_argument(
-        "--ip", default="127.0.0.1", help="The IP address to bind servers to."
-    )
-    parser.add_argument(
-        "--learn-port",
-        type=int,
-        default=8000,
-        help="The port for the learning/environment server (UDP).",
-    )
-    parser.add_argument(
-        "--weight-port",
-        type=int,
-        default=8001,
-        help="The port for the weight server (HTTP).",
+        "--weight-port", type=int, default=8001, help="Weight server HTTP port."
     )
     parser.add_argument(
         "--weights-file-name",
         default="network_weights.hdf5",
-        help="Base name for the HDF5 network weights file (saved in 'networks/' subdirectory relative to this script).",
+        help="Weights file base name (in ./networks/).",
     )
     parser.add_argument(
-        "--replay-capacity",
-        type=int,
-        default=10000,
-        help="Capacity of the experience replay memory.",
+        "--replay-capacity", type=int, default=10000, help="Replay memory capacity."
     )
     parser.add_argument(
-        "--save-freq",
-        type=int,
-        default=1000,
-        help="Save network weights every N updates.",
+        "--save-freq", type=int, default=1000, help="Save weights every N updates."
     )
     parser.add_argument(
-        "--log-dir",
-        default="/tmp/plato_logs",
-        help="Directory ONLY for saving TensorBoard logs.",
+        "--log-dir", default="/tmp/plato_logs", help="Directory for TensorBoard logs."
     )
 
     args = parser.parse_args()
 
     setup_logging(args.log_level)
-
     logger = logging.getLogger("Main")
 
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         networks_dir = os.path.join(script_dir, "networks")
         os.makedirs(networks_dir, exist_ok=True)
-        logger.info(f"Network weights will be saved in: {networks_dir}")
+        logger.info(f"Network weights dir: {networks_dir}")
         weights_file_full_path = os.path.join(networks_dir, args.weights_file_name)
-        logger.info(f"Using weights file path: {weights_file_full_path}")
+        logger.info(f"Weights file path: {weights_file_full_path}")
         os.makedirs(args.log_dir, exist_ok=True)
-        logger.info(f"TensorBoard logs will be saved in: {args.log_dir}")
+        logger.info(f"TensorBoard logs dir: {args.log_dir}")
     except OSError as e:
-        logger.error(f"Failed to create required directories: {e}", exc_info=True)
+        logger.error(f"Failed to create directories: {e}", exc_info=True)
         sys.exit(1)
     except NameError:
         logger.error(
-            "Could not determine script directory (__file__ is not defined). "
-            "Ensure execution as script. Defaulting weights path to current dir."
+            "Cannot determine script directory (__file__ undefined). Defaulting weights path."
         )
         weights_file_full_path = os.path.abspath(args.weights_file_name)
         os.makedirs(args.log_dir, exist_ok=True)
@@ -184,7 +155,6 @@ def main():
             lock=lock,
         )
         weight_server.start()
-
         learning_server = EnvironmentServer(
             state_dims=args.state_dims,
             action_dims=args.actions,
@@ -201,14 +171,13 @@ def main():
             log_dir=args.log_dir,
         )
         learning_server.start()
-
     except Exception as e:
         logger.error(f"Failed to initialize or start servers: {e}", exc_info=True)
         sys.exit(1)
 
     def signal_handler(signum, frame):
         logger.warning(
-            f"Received signal {signal.Signals(signum).name}. Initiating graceful shutdown..."
+            f"Received signal {signal.Signals(signum).name}. Initiating shutdown..."
         )
         shutdown_flag.set()
         logger.info("Shutdown flag set. Main process will exit.")
@@ -225,7 +194,7 @@ def main():
             time.sleep(1)
         except KeyboardInterrupt:
             logger.warning(
-                "KeyboardInterrupt caught directly in main loop (after signal handler). Forcing exit."
+                "KeyboardInterrupt caught directly in main loop. Forcing exit."
             )
             shutdown_flag.set()
             sys.exit(0)
