@@ -17,29 +17,45 @@ class ColoredFormatter(logging.Formatter):
         logging.ERROR: colorama.Fore.RED,
         logging.CRITICAL: colorama.Fore.MAGENTA + colorama.Style.BRIGHT,
     }
+    RESET_CODE = colorama.Style.RESET_ALL
 
     def __init__(self, fmt=None, datefmt=None, style="%", use_color=True):
         super().__init__(fmt, datefmt, style)
         self.use_color = use_color
         if self.use_color:
-            colorama.init(autoreset=True, strip=False)
+            colorama.init(autoreset=False)
 
     def format(self, record):
-        if not hasattr(record, "name"):
-            record.name = "root"
-        log_message = super().format(record)
+        record.message = record.getMessage()
+        if self.usesTime():
+            record.asctime = self.formatTime(record, self.datefmt)
+
+        log_entry = self._fmt % record.__dict__
+
         if self.use_color:
             level_color = self.LEVEL_COLORS.get(record.levelno, colorama.Fore.WHITE)
-            return f"{level_color}{log_message}"
-        else:
-            return log_message
+            levelname_colored = f"{level_color}{record.levelname}{self.RESET_CODE}"
+
+            try:
+                levelname_padded = f"[{record.levelname:<8s}]"
+
+                levelname_colored_padded = (
+                    f"[{level_color}{record.levelname:<8s}{self.RESET_CODE}]"
+                )
+                log_entry = log_entry.replace(
+                    levelname_padded, levelname_colored_padded, 1
+                )
+            except Exception:
+                log_entry = f"{level_color}{log_entry}{self.RESET_CODE}"
+                pass
+
+        return log_entry
 
 
 def setup_logging(level_str="INFO"):
     log_format = "%(asctime)s [%(process)d] [%(name)-10s] [%(levelname)-8s] %(message)s"
     date_format = "%Y-%m-%d %H:%M:%S"
     formatter = ColoredFormatter(fmt=log_format, datefmt=date_format)
-
     log_level_map = {
         "DEBUG": logging.DEBUG,
         "INFO": logging.INFO,
@@ -48,20 +64,16 @@ def setup_logging(level_str="INFO"):
         "CRITICAL": logging.CRITICAL,
     }
     numeric_level = log_level_map.get(level_str.upper(), logging.INFO)
-
     root_logger = logging.getLogger()
     root_logger.setLevel(numeric_level)
-
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(formatter)
     if root_logger.hasHandlers():
         root_logger.handlers.clear()
     root_logger.addHandler(handler)
-
     root_logger.info(
         f"Logging level set to: {logging.getLevelName(numeric_level)} ({numeric_level})"
     )
-
     logging.getLogger("tensorflow").setLevel(logging.ERROR)
     logging.getLogger("h5py").setLevel(logging.WARNING)
 
@@ -70,7 +82,6 @@ def main():
     parser = argparse.ArgumentParser(
         description="Start the distributed DQN Learning Server for Plato Robocode bot."
     )
-
     parser.add_argument(
         "--log-level",
         type=str.upper,
@@ -117,7 +128,6 @@ def main():
     parser.add_argument(
         "--log-dir", default="/tmp/plato_logs", help="Directory for TensorBoard logs."
     )
-
     args = parser.parse_args()
 
     setup_logging(args.log_level)
@@ -144,7 +154,6 @@ def main():
 
     lock = mp.Lock()
     shutdown_flag = mp.Event()
-
     weight_server = None
     learning_server = None
     try:
@@ -186,7 +195,6 @@ def main():
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-
     logger.info("Servers started successfully. Press Ctrl+C to stop.")
 
     while not shutdown_flag.is_set():
