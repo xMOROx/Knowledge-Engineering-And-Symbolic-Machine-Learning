@@ -1,6 +1,7 @@
 import logging
 import sys
-from colorama import init, Fore, Style, Back
+
+from colorama import Back, Fore, Style, init
 
 init(autoreset=True)
 
@@ -56,7 +57,7 @@ class ColoredFormatter(logging.Formatter):
 
 def setup_logging(level_name="INFO"):
     """Configures the root logger with colored console output."""
-    from .constants import LOG_LEVEL_MAP, DEFAULT_LOG_LEVEL
+    from .constants import DEFAULT_LOG_LEVEL, LOG_LEVEL_MAP
 
     level = LOG_LEVEL_MAP.get(level_name.upper(), LOG_LEVEL_MAP[DEFAULT_LOG_LEVEL])
     logger = logging.getLogger()

@@ -1,9 +1,9 @@
-import shutil
 import logging
-import sys
-import socket
-import time
 import os
+import shutil
+import socket
+import sys
+import time
 from pathlib import Path
 from typing import List
 

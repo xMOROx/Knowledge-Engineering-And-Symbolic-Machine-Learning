@@ -1,22 +1,23 @@
 import logging
-import subprocess
 import os
+import subprocess
 from pathlib import Path
 from typing import Optional
+
 from colorama import Style
 
 from .config import Config
-from .process_manager import ProcessManager
-from .utils import expand_classpath_wildcards, wait_for_ports
 from .constants import (
-    SERVER_WAIT_TIMEOUT_S,
-    SERVER_WAIT_INTERVAL_S,
-    SERVER_PREFIX,
-    TBOARD_PREFIX,
-    ROBO_PREFIX_BASE,
     COMPILER_PREFIX,
+    ROBO_PREFIX_BASE,
+    SERVER_PREFIX,
+    SERVER_WAIT_INTERVAL_S,
+    SERVER_WAIT_TIMEOUT_S,
+    TBOARD_PREFIX,
 )
 from .logger import log_with_prefix
+from .process_manager import ProcessManager
+from .utils import expand_classpath_wildcards, wait_for_ports
 
 log = logging.getLogger(__name__)
 

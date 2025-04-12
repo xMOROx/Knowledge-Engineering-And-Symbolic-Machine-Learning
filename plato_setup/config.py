@@ -1,22 +1,23 @@
-import yaml
-import os
 import logging
-from pathlib import Path
-from typing import Dict, Any, Optional, List
+import os
 import shutil
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+import yaml
 
 from .constants import (
     DEFAULT_CONFIG_FILENAME,
-    REQUIRED_COMMANDS,
-    DEFAULT_ROBOT_SRC_REL,
+    DEFAULT_LOG_DIR_REL,
+    DEFAULT_PROJECT_LIBS_REL,
     DEFAULT_ROBOT_BIN_REL,
     DEFAULT_ROBOT_LIBS_REL,
-    DEFAULT_PROJECT_LIBS_REL,
+    DEFAULT_ROBOT_SRC_REL,
     DEFAULT_SERVER_DIR_REL,
     DEFAULT_SERVER_SCRIPT,
-    DEFAULT_LOG_DIR_REL,
     GENERATED_BATTLE_FILENAME,
     PROJECT_ROOT,
+    REQUIRED_COMMANDS,
 )
 
 log = logging.getLogger(__name__)

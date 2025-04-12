@@ -1,40 +1,41 @@
 #!/usr/bin/env python3
 import argparse
-import logging
-import sys
-import os
 import signal
+import sys
 import time
-from typing import Optional
 from pathlib import Path
-from colorama import Fore, Style
+from typing import Optional
+
+from colorama import Style
+
+import plato_setup
 
 try:
     from plato_setup import (
-        Config,
-        ConfigError,
-        setup_logging,
-        ProcessManager,
-        check_required_commands,
-        clean_log_directory,
-        generate_battle_file,
-        compile_robot,
-        check_robot_compiled,
-        start_tensorboard,
-        start_server,
-        wait_for_server_ports,
-        start_robocode_instance,
-        log_info,
-        log_warn,
-        log_error,
-        log_debug,
         SCRIPT_NAME,
         SCRIPT_VERSION,
+        Config,
+        ConfigError,
+        ProcessManager,
+        check_required_commands,
+        check_robot_compiled,
+        clean_log_directory,
+        compile_robot,
+        generate_battle_file,
+        log_debug,
+        log_error,
+        log_info,
+        log_warn,
+        setup_logging,
+        start_robocode_instance,
+        start_server,
+        start_tensorboard,
+        wait_for_server_ports,
     )
     from plato_setup.constants import (
         DEFAULT_CONFIG_FILENAME,
-        REQUIRED_COMMANDS,
         PROJECT_ROOT,
+        REQUIRED_COMMANDS,
     )
 except ImportError as e:
     print(
@@ -49,30 +50,30 @@ except ImportError as e:
         )
         sys.path.insert(0, str(script_dir))
         from plato_setup import (
-            Config,
-            ConfigError,
-            setup_logging,
-            ProcessManager,
-            check_required_commands,
-            clean_log_directory,
-            generate_battle_file,
-            compile_robot,
-            check_robot_compiled,
-            start_tensorboard,
-            start_server,
-            wait_for_server_ports,
-            start_robocode_instance,
-            log_info,
-            log_warn,
-            log_error,
-            log_debug,
             SCRIPT_NAME,
             SCRIPT_VERSION,
+            Config,
+            ConfigError,
+            ProcessManager,
+            check_required_commands,
+            check_robot_compiled,
+            clean_log_directory,
+            compile_robot,
+            generate_battle_file,
+            log_debug,
+            log_error,
+            log_info,
+            log_warn,
+            setup_logging,
+            start_robocode_instance,
+            start_server,
+            start_tensorboard,
+            wait_for_server_ports,
         )
         from plato_setup.constants import (
             DEFAULT_CONFIG_FILENAME,
-            REQUIRED_COMMANDS,
             PROJECT_ROOT,
+            REQUIRED_COMMANDS,
         )
     else:
         sys.exit(1)
@@ -392,7 +393,7 @@ def main():
 
     log_dir = cfg.get_path("log_dir")
     if not log_dir:
-        log_critical("Log directory path not found in configuration.")
+        log_error("Log directory path not found in configuration.")
         sys.exit(1)
 
     if do_clean_logs:
