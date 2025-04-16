@@ -49,18 +49,6 @@ Before running the project, ensure you have the following installed and configur
     * Ensure `python3` (or the specific command you intend to use, like `python`) is available in your system's PATH. Check with `python3 --version`.
 5. **Python Libraries (`pip`)**:
     * You need `pip` (Python's package installer), which usually comes with Python 3.
-    * Install the required Python packages listed in `requirements.txt`. If this file doesn't exist yet, create it in the project root. It should include at least:
-
-        ```txt
-        # requirements.txt
-        PyYAML         # For reading config.yaml
-        colorama       # For colored terminal output
-        # Add packages needed by plato-server/main.py:
-        # tensorflow >= 2.x  # OR torch >= 1.x (Choose one for RL)
-        # numpy
-        # ... other dependencies for your RL agent/server (e.g., gym, matplotlib)
-        ```
-
     * Install using pip:
 
         ```bash
@@ -238,8 +226,10 @@ python train.py [OPTIONS]
 ## 📊 Outputs
 
 * **Logs**:
-    > [!IMPORTANT]
-    > All output from the Python server, Robocode instances, TensorBoard, and Maven builds are redirected to files within the directory specified by `logging.log_dir` in `config.yaml` (default: `./logs`). **Check these files first when troubleshooting!**
+
+> [!IMPORTANT]
+> All output from the Python server, Robocode instances, TensorBoard, and Maven builds are redirected to files within the directory specified by `logging.log_dir` in `config.yaml` (default: `./logs`). **Check these files first when troubleshooting!**
+
 * **TensorBoard**: If started successfully, you can access the TensorBoard UI in your web browser. The script will print the URL (usually `http://localhost:6006/`). This visualizes data logged by the Python server (rewards, loss, episode length, etc. - *requires implementation in `plato-server/main.py`*).
 * **Generated Battle File**: The specific `.battle` file used by Robocode instances is generated inside the log directory (e.g., `./logs/plato_generated.battle`).
 
@@ -257,13 +247,15 @@ Press `Ctrl+C` in the terminal where `train.py` is running. The script will atte
 * **`tensorboard` command not found**: Install TensorFlow or TensorBoard (`pip install tensorboard`). Verify with `tensorboard --version`.
 * **Python `ModuleNotFoundError`**: Ensure you have installed the required packages using `pip install -r requirements.txt`. Make sure your `requirements.txt` includes all necessary libraries for `plato-server`.
 * **Robocode `Can't find 'pl.agh.edu.plato.PlatoRobot*'`**:
-    > [!WARNING]
-    > This is a common error indicating Robocode cannot locate your compiled robot class.
-  * Verify `robocode.home` in `config.yaml` is correct and points to a valid Robocode installation.
-  * Run `mvn clean package` manually in the `plato-robot` directory. Check for `[INFO] BUILD SUCCESS`. If errors occur, fix them.
-  * **Inspect the JAR**: `cd plato-robot && unzip -l target/*.jar | grep "pl/agh/edu/plato/PlatoRobot.class"`. This **must** show the class file. If not, check the `package` declaration in `PlatoRobot.java` and the directory structure `src/main/java/pl/agh/edu/plato/`.
-  * **Check Classpath**: Check the full classpath logged by `train.py -v` when starting Robocode. Ensure the absolute paths to `robocode/libs/*`, `plato-robot/target/*.jar`, and `plato-robot/target/lib/*` are present and correct for your OS.
-  * **Clear Cache**: Clear the Robocode cache: Delete the directory `{robocode_home}/robots/.data/` (or similar path), then run `mvn clean package` and `python train.py` again.
+
+> [!WARNING]
+> This is a common error indicating Robocode cannot locate your compiled robot class.
+
+* Verify `robocode.home` in `config.yaml` is correct and points to a valid Robocode installation.
+* Run `mvn clean package` manually in the `plato-robot` directory. Check for `[INFO] BUILD SUCCESS`. If errors occur, fix them.
+* **Inspect the JAR**: `cd plato-robot && unzip -l target/*.jar | grep "pl/agh/edu/plato/PlatoRobot.class"`. This **must** show the class file. If not, check the `package` declaration in `PlatoRobot.java` and the directory structure `src/main/java/pl/agh/edu/plato/`.
+* **Check Classpath**: Check the full classpath logged by `train.py -v` when starting Robocode. Ensure the absolute paths to `robocode/libs/*`, `plato-robot/target/*.jar`, and `plato-robot/target/lib/*` are present and correct for your OS.
+* **Clear Cache**: Clear the Robocode cache: Delete the directory `{robocode_home}/robots/.data/` (or similar path), then run `mvn clean package` and `python train.py` again.
 * **Server Connection Issues (Robot can't download weights/send data)**:
   * Check `server.ip` in `config.yaml`. `127.0.0.1` must match the address the robot is trying to connect to.
   * Ensure no firewall is blocking `server.learn_port` (UDP) or `server.weight_port` (TCP).
