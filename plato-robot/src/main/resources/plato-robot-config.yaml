@@ -1,0 +1,20 @@
+server:
+  ip: "127.0.0.1"
+  learningPort: 8000
+  weightPort: 8001
+
+rl:
+  explorationEpsilon: 0.1
+
+timing:
+  networkReloadInterval: 1000
+  actionInterval: 10
+
+rewards:
+  hitMultiplier: 4.0
+  survival: 0.01
+  aimedReady: 0.1
+  penaltyGotHitMultiplier: 1.0
+  penaltyHitWall: 2.0
+  penaltyDeath: 50.0
+  win: 50.0

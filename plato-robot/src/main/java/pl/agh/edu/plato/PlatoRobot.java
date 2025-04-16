@@ -3,27 +3,19 @@ package pl.agh.edu.plato;
 import java.io.File;
 import java.util.Random;
 
+import pl.agh.edu.plato.config.ConfigLoadException;
+import pl.agh.edu.plato.config.ConfigLoader;
+import pl.agh.edu.plato.config.RobotConfig;
 import robocode.AdvancedRobot;
 import robocode.DeathEvent;
+import robocode.HitWallEvent;
 import robocode.ScannedRobotEvent;
 import robocode.WinEvent;
-import robocode.HitWallEvent;
 
 public class PlatoRobot extends AdvancedRobot {
 
-  private static final String SERVER_IP = "127.0.0.1";
-  private static final int LEARNING_SERVER_PORT = 8000;
-  private static final int WEIGHT_SERVER_PORT = 8001;
-  private static final String WEIGHT_SERVER_URL = "http://" + SERVER_IP + ":" + WEIGHT_SERVER_PORT;
-  private static final double EXPLORATION_EPSILON = 0.1;
-  private static final int NETWORK_RELOAD_INTERVAL = 1000;
-  private static final int ACTION_INTERVAL = 10;
-
-  private static final double REWARD_HIT_MULTIPLIER = 4.0;
-  private static final double PENALTY_GOT_HIT_MULTIPLIER = 1.0;
-  private static final double REWARD_SURVIVAL = 0.01;
-  private static final double REWARD_AIMED_AND_READY = 0.1;
-  private static final double PENALTY_HIT_WALL = -2.0;
+  private RobotConfig config;
+  private String weightServerUrl;
 
   StateReporter stateReporter;
   Network network;
@@ -33,7 +25,6 @@ public class PlatoRobot extends AdvancedRobot {
   State currentState = null;
   Action lastActionChosen = Action.NOTHING;
   double rewardReceived = 0.0;
-
   Random randomGenerator = new Random();
 
   private enum Action {
@@ -54,7 +45,7 @@ public class PlatoRobot extends AdvancedRobot {
         case 5:
           return NOTHING;
         default:
-          System.err.println("[PlatoRobot] Warning: Invalid action index received: " + x + ". Defaulting to NOTHING.");
+          System.err.println("[PlatoRobot] Warning: Invalid action index: " + x);
           return NOTHING;
       }
     }
@@ -64,18 +55,40 @@ public class PlatoRobot extends AdvancedRobot {
   public void run() {
     out.println("[PlatoRobot] --- RUN() METHOD STARTED ---");
     out.flush();
+
+    try {
+      this.config = ConfigLoader.loadConfig();
+      this.weightServerUrl = "http://" + config.server.ip + ":" + config.server.weightPort;
+      out.println("[PlatoRobot] Configuration loaded.");
+      out.println("[PlatoRobot] Config - Server: " + config.server.ip + ":" + config.server.weightPort + "/"
+          + config.server.learningPort);
+      out.println("[PlatoRobot] Config - Epsilon: " + config.rl.explorationEpsilon);
+    } catch (ConfigLoadException e) {
+      out.println("[PlatoRobot] FATAL: Configuration loading failed!");
+      e.printStackTrace(out);
+      out.flush();
+      doNothingLoop();
+      return;
+    } catch (Exception e) {
+      out.println("[PlatoRobot] FATAL: Unexpected error during initial setup!");
+      e.printStackTrace(out);
+      out.flush();
+      doNothingLoop();
+      return;
+    }
+
     this.robotId = getName() + "_" + System.identityHashCode(this);
     out.println("[PlatoRobot] Robot instance ID: " + this.robotId);
     out.flush();
 
     try {
-      this.stateReporter = new StateReporter(SERVER_IP, LEARNING_SERVER_PORT);
+      this.stateReporter = new StateReporter(config.server.ip, config.server.learningPort);
       this.network = new Network();
       this.networkFile = this.getDataFile("network_" + this.robotId + ".hdf5");
 
-      out.println("[PlatoRobot] Performing initial network download...");
+      out.println("[PlatoRobot] Performing initial network download from " + this.weightServerUrl);
       out.flush();
-      boolean loaded = this.network.downloadNetwork(WEIGHT_SERVER_URL, this.networkFile);
+      boolean loaded = this.network.downloadNetwork(this.weightServerUrl, this.networkFile);
       if (!loaded) {
         out.println("[PlatoRobot] FATAL: Initial network download failed. Robot cannot function.");
         out.flush();
@@ -90,16 +103,16 @@ public class PlatoRobot extends AdvancedRobot {
 
       while (true) {
         setTurnRadarRight(360);
-        if (getTime() > 0 && getTime() % ACTION_INTERVAL == 0) {
+        if (getTime() > 0 && getTime() % config.timing.actionInterval == 0) {
           performAction();
         }
-        if (getTime() > 0 && getTime() % NETWORK_RELOAD_INTERVAL == 0) {
+        if (getTime() > 0 && getTime() % config.timing.networkReloadInterval == 0) {
           reloadNetwork();
         }
         execute();
       }
     } catch (Throwable t) {
-      out.println("[PlatoRobot] FATAL ERROR in run() or initialization:");
+      out.println("[PlatoRobot] FATAL ERROR in run() or main loop:");
       out.flush();
       t.printStackTrace(out);
       out.flush();
@@ -108,7 +121,7 @@ public class PlatoRobot extends AdvancedRobot {
   }
 
   private void doNothingLoop() {
-    out.println("[PlatoRobot] Entering do-nothing loop.");
+    out.println("[PlatoRobot] Entering do-nothing loop (initialization failed).");
     out.flush();
     while (true) {
       try {
@@ -144,7 +157,7 @@ public class PlatoRobot extends AdvancedRobot {
     }
 
     if (this.network != null) {
-      boolean success = this.network.downloadNetwork(WEIGHT_SERVER_URL, this.networkFile);
+      boolean success = this.network.downloadNetwork(this.weightServerUrl, this.networkFile);
       if (success) {
         out.println("[PlatoRobot] Network reloaded successfully at time " + getTime() + " with " + this.network.updates
             + " server updates.");
@@ -193,7 +206,6 @@ public class PlatoRobot extends AdvancedRobot {
     };
 
     double[] qValues = this.network.evaluate(inputs);
-
     int expectedActionCount = Action.values().length;
     if (qValues == null || qValues.length != expectedActionCount) {
       out.println(
@@ -207,10 +219,11 @@ public class PlatoRobot extends AdvancedRobot {
     }
 
     Action actionToTake;
-    if (randomGenerator.nextDouble() < EXPLORATION_EPSILON) {
+    if (randomGenerator.nextDouble() < config.rl.explorationEpsilon) {
       int randomIndex = randomGenerator.nextInt(expectedActionCount);
       actionToTake = Action.fromInteger(randomIndex);
-      out.println("[PlatoRobot] Action @ " + getTime() + " (Random): " + actionToTake);
+      out.println("[PlatoRobot] Action @ " + getTime() + " (Random - eps=" + config.rl.explorationEpsilon + "): "
+          + actionToTake);
       out.flush();
     } else {
       int bestActionIndex = 0;
@@ -245,8 +258,7 @@ public class PlatoRobot extends AdvancedRobot {
         if (getGunHeat() == 0 && getEnergy() > 0.1) {
           setFire(1);
         } else {
-          out.println("[PlatoRobot] Action FIRE chosen, but gun hot (" + String.format("%.1f", getGunHeat())
-              + ") or low energy (" + String.format("%.1f", getEnergy()) + "). Skipping fire.");
+          out.println("[PlatoRobot] Action FIRE chosen, but gun hot/low energy. Skipping fire.");
           out.flush();
         }
         break;
@@ -273,38 +285,39 @@ public class PlatoRobot extends AdvancedRobot {
     this.currentState = newState;
 
     double reward = 0.0;
-    reward += REWARD_SURVIVAL;
+    reward += config.rewards.survival;
 
     if (this.previousState != null) {
-      double opponentEnergyPrevious = this.previousState.opponentEnergy * 10.0;
-      double opponentEnergyChange = opponentEnergyPrevious - event.getEnergy();
-      if (opponentEnergyChange > 0.09 && opponentEnergyChange < 3.01) {
-        double hitReward = opponentEnergyChange * REWARD_HIT_MULTIPLIER;
+      double opponentEnergyChangeScaled = this.previousState.opponentEnergy - newState.opponentEnergy;
+      if (opponentEnergyChangeScaled > 0.009 && opponentEnergyChangeScaled < 0.301) {
+        double actualEnergyChange = opponentEnergyChangeScaled * 10.0;
+        double hitReward = actualEnergyChange * config.rewards.hitMultiplier;
         reward += hitReward;
-        out.printf("[PlatoRobot] Reward Calc @ %d: Opponent Hit! Delta=%.2f, Reward+=%.3f\n", getTime(),
-            opponentEnergyChange, hitReward);
+        out.printf("[PlatoRobot] Reward Calc @ %d: Opponent Hit! ScaledDelta=%.3f, Reward+=%.3f\n", getTime(),
+            opponentEnergyChangeScaled, hitReward);
         out.flush();
       }
 
-      double selfEnergyPrevious = this.previousState.agentEnergy * 10.0;
-      double selfEnergyChange = getEnergy() - selfEnergyPrevious;
-      if (selfEnergyChange < -0.09) {
-        double hitPenalty = selfEnergyChange * PENALTY_GOT_HIT_MULTIPLIER;
+      double selfEnergyChangeScaled = newState.agentEnergy - this.previousState.agentEnergy;
+      if (selfEnergyChangeScaled < -0.009) {
+        double actualEnergyLost = -selfEnergyChangeScaled * 10.0;
+        double hitPenalty = -actualEnergyLost * config.rewards.penaltyGotHitMultiplier;
         reward += hitPenalty;
-        out.printf("[PlatoRobot] Reward Calc @ %d: Got Hit! Delta=%.2f, Reward+=%.3f\n", getTime(), selfEnergyChange,
-            hitPenalty);
+        out.printf("[PlatoRobot] Reward Calc @ %d: Got Hit! ScaledDelta=%.3f, Reward+=%.3f\n", getTime(),
+            selfEnergyChangeScaled, hitPenalty);
         out.flush();
       }
     }
 
     double gunTurnRemaining = getGunTurnRemainingRadians();
     if (getGunHeat() == 0 && Math.abs(gunTurnRemaining) < Math.toRadians(5.0)) {
-      reward += REWARD_AIMED_AND_READY;
+      reward += config.rewards.aimedReady;
     }
 
-    this.rewardReceived = reward;
-    out.printf("[PlatoRobot] Scan processed @ %d. Updated currentState. Total rewardReceived = %.3f\n", getTime(),
-        this.rewardReceived);
+    this.rewardReceived += reward;
+    out.printf(
+        "[PlatoRobot] Scan processed @ %d. Updated currentState. Cycle reward = %.3f. Total pending reward = %.3f\n",
+        getTime(), reward, this.rewardReceived);
     out.flush();
 
     double absoluteBearingRadians = getHeadingRadians() + event.getBearingRadians();
@@ -316,8 +329,9 @@ public class PlatoRobot extends AdvancedRobot {
   public void onHitWall(HitWallEvent event) {
     out.println("[PlatoRobot] --- ONHITWALL EVENT at time " + getTime() + " ---");
     out.flush();
-    this.rewardReceived += PENALTY_HIT_WALL;
-    out.printf("[PlatoRobot] Hit wall penalty applied. rewardReceived = %.3f\n", this.rewardReceived);
+    this.rewardReceived -= config.rewards.penaltyHitWall;
+    out.printf("[PlatoRobot] Hit wall penalty applied (-%.3f). Current rewardReceived = %.3f\n",
+        config.rewards.penaltyHitWall, this.rewardReceived);
     out.flush();
   }
 
@@ -334,6 +348,7 @@ public class PlatoRobot extends AdvancedRobot {
       } else {
         finalState = new State((float) getHeading(), (float) getEnergy(), (float) getGunHeat(), (float) getX(),
             (float) getY(), 0.0f, 0.0f, 0.0f);
+        out.println("[PlatoRobot] Warning: Using fallback final state in onDeath.");
       }
     } catch (Exception e) {
       out.println("[PlatoRobot] Error creating final state in onDeath: " + e.getMessage());
@@ -344,19 +359,23 @@ public class PlatoRobot extends AdvancedRobot {
       return;
     }
 
-    if (this.stateReporter != null) {
-      final float deathPenalty = -50.0f;
-      out.println("[PlatoRobot] Recording final transition (DEATH) for action " + this.lastActionChosen
-          + " with reward: " + deathPenalty);
+    if (this.stateReporter != null && this.previousState != null) {
+      float finalReward = (float) (this.rewardReceived - config.rewards.penaltyDeath);
+      out.printf(
+          "[PlatoRobot] Recording final transition (DEATH) for action %s. BaseReward=%.3f, DeathPenalty=%.3f, FinalReward=%.3f\n",
+          this.lastActionChosen, this.rewardReceived, config.rewards.penaltyDeath, finalReward);
       out.flush();
-      this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(), deathPenalty, finalState,
+      this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(), finalReward, finalState,
           true);
       out.println("[PlatoRobot] Final DEATH transition sent.");
       out.flush();
-      this.stateReporter.close();
     } else {
-      out.println("[PlatoRobot] Cannot send final DEATH transition: stateReporter is null.");
+      out.println("[PlatoRobot] Cannot send final DEATH transition: stateReporter or previousState is null.");
       out.flush();
+    }
+
+    if (this.stateReporter != null) {
+      this.stateReporter.close();
     }
     cleanup();
   }
@@ -374,6 +393,7 @@ public class PlatoRobot extends AdvancedRobot {
       } else {
         finalState = new State((float) getHeading(), (float) getEnergy(), (float) getGunHeat(), (float) getX(),
             (float) getY(), 0.0f, 0.0f, 0.0f);
+        out.println("[PlatoRobot] Warning: Using fallback final state in onWin.");
       }
     } catch (Exception e) {
       out.println("[PlatoRobot] Error creating final state in onWin: " + e.getMessage());
@@ -384,36 +404,26 @@ public class PlatoRobot extends AdvancedRobot {
       return;
     }
 
-    if (this.stateReporter != null) {
-      final float winReward = 50.0f;
-      out.println("[PlatoRobot] Recording final transition (WIN) for action " + this.lastActionChosen + " with reward: "
-          + winReward);
+    if (this.stateReporter != null && this.previousState != null) {
+      float finalReward = (float) (this.rewardReceived + config.rewards.win);
+      out.printf(
+          "[PlatoRobot] Recording final transition (WIN) for action %s. BaseReward=%.3f, WinReward=%.3f, FinalReward=%.3f\n",
+          this.lastActionChosen, this.rewardReceived, config.rewards.win, finalReward);
       out.flush();
-      this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(), winReward, finalState,
+      this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(), finalReward, finalState,
           true);
       out.println("[PlatoRobot] Final WIN transition sent.");
       out.flush();
-      this.stateReporter.close();
     } else {
-      out.println("[PlatoRobot] Cannot send final WIN transition: stateReporter is null.");
+      out.println("[PlatoRobot] Cannot send final WIN transition: stateReporter or previousState is null.");
       out.flush();
+    }
+
+    if (this.stateReporter != null) {
+      this.stateReporter.close();
     }
     cleanup();
   }
-
-  // @Override
-  // public void onRoundEnded(RoundEndedEvent event) {
-  // out.println("[PlatoRobot] --- ONROUNDENDED EVENT at time " + getTime() + "
-  // ---");
-  // out.flush();
-  // if (this.stateReporter != null && !this.stateReporter.s.isClosed()) {
-  // out.println("[PlatoRobot] Round ended, ensuring StateReporter socket is
-  // closed.");
-  // out.flush();
-  // this.stateReporter.close();
-  // }
-  // cleanup();
-  // }
 
   private void cleanup() {
     out.println("[PlatoRobot] Performing cleanup...");
@@ -427,10 +437,13 @@ public class PlatoRobot extends AdvancedRobot {
         out.flush();
       }
     }
+
     this.previousState = null;
     this.currentState = null;
-    this.lastActionChosen = Action.NOTHING;
-    this.rewardReceived = 0.0;
+    this.network = null;
+    this.stateReporter = null;
+    this.config = null;
+
     out.println("[PlatoRobot] Cleanup finished.");
     out.flush();
   }
