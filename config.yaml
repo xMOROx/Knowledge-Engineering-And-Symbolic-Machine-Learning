@@ -7,14 +7,12 @@ robocode:
   my_robot_name: "pl.agh.edu.plato.PlatoRobot*"
   opponents: ["sample.SittingDuck"]
 
-  # --- Battle Parameters ---
   num_rounds: 1000
   inactivity_time: 3000
   gun_cooling_rate: 0.1
   battlefield_width: 800
   battlefield_height: 600
 
-# Python Server Settings
 server:
   ip: "127.0.0.1"
   learn_port: 8000
@@ -24,23 +22,11 @@ server:
 
 logging:
   log_dir: "./logs"
-  # Python server log level (DEBUG, INFO, WARNING, ERROR, CRITICAL)
   python_log_level: "INFO"
 
 tensorboard:
-  # Bind TensorBoard to all interfaces (true) or just localhost (false)
   bind_all: false
 
 project_paths:
   server_dir: "plato-server"
   maven_project_dir: "plato-robot"
-# Optional Maven Configuration (Defaults are usually derived from pom.xml via tasks.py)
-# maven:
-#   artifact_id: "plato-robot"
-#   version: "1.0-SNAPSHOT"
-
-# Optional Script Behavior Defaults (Can be overridden by command line flags)
-# script_behavior:
-#   clean_logs: true
-#   compile_robot: true
-#   tail_logs: true
