@@ -9,10 +9,7 @@ import yaml
 from .constants import (
     DEFAULT_CONFIG_FILENAME,
     DEFAULT_LOG_DIR_REL,
-    DEFAULT_PROJECT_LIBS_REL,
-    DEFAULT_ROBOT_BIN_REL,
-    DEFAULT_ROBOT_LIBS_REL,
-    DEFAULT_ROBOT_SRC_REL,
+    DEFAULT_MAVEN_PROJECT_REL,
     DEFAULT_SERVER_DIR_REL,
     DEFAULT_SERVER_SCRIPT,
     GENERATED_BATTLE_FILENAME,
@@ -39,6 +36,7 @@ REQUIRED_SECTIONS = {
     "server": ["ip", "learn_port", "weight_port", "python_exe"],
     "logging": ["log_dir", "python_log_level"],
     "tensorboard": ["bind_all"],
+    "project_paths": ["maven_project_dir"],
 }
 
 
@@ -100,11 +98,8 @@ class Config:
 
             for key in keys:
                 if key not in section_data or section_data.get(key) is None:
-                    # Allow empty list for opponents initially
                     if section == "robocode" and key == "opponents":
-                        if (
-                            key not in section_data
-                        ):  # Check presence even if allowed empty
+                        if key not in section_data:
                             missing_items.append(f"{section}.{key}")
                     else:
                         missing_items.append(f"{section}.{key}")
@@ -125,58 +120,67 @@ class Config:
                 keys = key_path.split(".")
                 d = self.data
                 try:
-                    for i, k in enumerate(keys):
-                        if i == len(keys) - 1:  # Last key, assign value
-                            # Try to convert type based on existing value if possible
-                            existing_val = d.get(k)
-                            if isinstance(existing_val, bool):
-                                d[k] = str(value).lower() == "true"
-                            elif isinstance(existing_val, int):
-                                d[k] = int(value)
-                            elif isinstance(existing_val, float):
-                                d[k] = float(value)
-                            # Add other type conversions if needed (e.g., lists)
-                            else:
-                                d[k] = value  # Assign as string or original type
-                        else:  # Navigate deeper
-                            if k not in d or not isinstance(d[k], dict):
-                                d[k] = {}  # Create intermediate dict if needed
-                            d = d[k]
-                except (ValueError, TypeError) as e:
-                    log.warning(
-                        f"Could not apply override {key_path}={value}: Type mismatch or path error? {e}"
-                    )
-                except KeyError:
+                    target_dict = d
+                    for i, k in enumerate(keys[:-1]):
+                        if k not in target_dict or not isinstance(target_dict[k], dict):
+                            target_dict[k] = {}
+                        target_dict = target_dict[k]
+
+                    final_key = keys[-1]
+                    existing_val = target_dict.get(final_key)
+                    converted_value = value
+                    if isinstance(existing_val, bool):
+                        if isinstance(value, bool):
+                            converted_value = value
+                        elif isinstance(value, str):
+                            converted_value = value.lower() in ("true", "1", "yes")
+                        else:
+                            log.warning(
+                                f"Cannot convert override value '{value}' to bool for '{key_path}'"
+                            )
+                    elif isinstance(existing_val, int):
+                        try:
+                            converted_value = int(value)
+                        except (ValueError, TypeError):
+                            log.warning(
+                                f"Cannot convert override value '{value}' to int for '{key_path}'"
+                            )
+                    elif isinstance(existing_val, float):
+                        try:
+                            converted_value = float(value)
+                        except (ValueError, TypeError):
+                            log.warning(
+                                f"Cannot convert override value '{value}' to float for '{key_path}'"
+                            )
+
+                    target_dict[final_key] = converted_value
+
+                except (KeyError, IndexError):
                     log.warning(
                         f"Could not apply override {key_path}={value}: Invalid key path."
                     )
+                except Exception as e:
+                    log.warning(f"Error applying override {key_path}={value}: {e}")
 
     def _derive_paths(self):
         """Resolve relative paths relative to project_root."""
         project_paths_config = self.data.get("project_paths", {})
 
-        # Helper to resolve path
         def resolve_path(key: str, default_rel: str) -> Path:
-            rel_path_str = project_paths_config.get(key, default_rel)
-            path = (self.project_root / rel_path_str).resolve()
+            path_str = project_paths_config.get(key, default_rel)
+            path = Path(path_str)
+            if not path.is_absolute():
+                path = (self.project_root / path_str).resolve()
+            else:
+                path = path.resolve()
             log.debug(f"Resolved path '{key}': {path}")
             return path
 
-        self.paths["robot_src_dir"] = resolve_path(
-            "robot_src_dir", DEFAULT_ROBOT_SRC_REL
-        )
-        self.paths["robot_bin_dir"] = resolve_path(
-            "robot_bin_dir", DEFAULT_ROBOT_BIN_REL
-        )
-        self.paths["robot_libs_dir"] = resolve_path(
-            "robot_libs_dir", DEFAULT_ROBOT_LIBS_REL
-        )
-        self.paths["project_libs_dir"] = resolve_path(
-            "project_libs_dir", DEFAULT_PROJECT_LIBS_REL
-        )
         self.paths["server_dir"] = resolve_path("server_dir", DEFAULT_SERVER_DIR_REL)
+        self.paths["maven_project_dir"] = resolve_path(
+            "maven_project_dir", DEFAULT_MAVEN_PROJECT_REL
+        )
 
-        # --- Handle log_dir ---
         log_dir_str = self.get("logging.log_dir", DEFAULT_LOG_DIR_REL)
         log_dir_path = Path(log_dir_str)
         if not log_dir_path.is_absolute():
@@ -184,16 +188,20 @@ class Config:
         self.paths["log_dir"] = log_dir_path
         log.debug(f"Resolved path 'log_dir': {self.paths['log_dir']}")
 
-        # --- Handle robocode_home ---
         robocode_home_str = self.get("robocode.home")
-        if (
-            not robocode_home_str
-        ):  # Should have been caught earlier, but belt-and-suspenders
+        if not robocode_home_str:
             raise ConfigError("robocode.home is not defined in config!")
         self.paths["robocode_home"] = Path(robocode_home_str).resolve()
+        if not self.paths["robocode_home"].is_dir():
+            log.warning(
+                f"Configured robocode.home does not exist or is not a directory: {self.paths['robocode_home']}"
+            )
+            raise ConfigError(
+                f"Robocode home directory not found: {self.paths['robocode_home']}"
+            )
+
         log.debug(f"Resolved path 'robocode_home': {self.paths['robocode_home']}")
 
-        # --- Handle generated battle file path ---
         self.paths["generated_battle_file"] = (
             self.paths["log_dir"] / GENERATED_BATTLE_FILENAME
         )
@@ -207,41 +215,30 @@ class Config:
             )
         robocode_jar = self.paths["robocode_home"] / "libs" / "robocode.jar"
         if not robocode_jar.is_file():
-            log.warning(f"Cannot verify robocode.jar in {robocode_jar.parent}")
+            log.warning(
+                f"Cannot verify robocode.jar in {robocode_jar.parent}. Robocode installation might be incomplete."
+            )
 
-        # --- Validate Python Executable ---
         python_exe = self.get("server.python_exe", "python3")
-        if not shutil.which(python_exe):
-            # Check if it's an absolute/relative path that exists
+        resolved_py_exe = shutil.which(python_exe)
+        if resolved_py_exe:
+            self.data["server"]["python_exe_resolved"] = resolved_py_exe
+        else:
             py_path = Path(python_exe)
-            if not py_path.is_file() or not os.access(py_path, os.X_OK):
-                if not (
-                    py_path.is_absolute() or python_exe.startswith(".")
-                ):  # If not found and not explicit path
-                    raise ConfigError(
-                        f"Python executable '{python_exe}' not found in PATH. Provide full path if needed."
-                    )
-                elif not py_path.is_file():
-                    raise ConfigError(
-                        f"Python executable path '{python_exe}' does not exist or is not a file."
-                    )
-                else:  # Exists but not executable
-                    raise ConfigError(
-                        f"Python executable path '{python_exe}' is not executable."
-                    )
-        self.data["server"]["python_exe_resolved"] = shutil.which(python_exe) or str(
-            Path(python_exe).resolve()
-        )
+            if py_path.is_file() and os.access(py_path, os.X_OK):
+                self.data["server"]["python_exe_resolved"] = str(py_path.resolve())
+            else:
+                raise ConfigError(
+                    f"Python executable '{python_exe}' not found in PATH or is not a valid executable file."
+                )
         log.debug(
             f"Resolved Python executable: {self.get('server.python_exe_resolved')}"
         )
 
-        # --- Check other required commands ---
         for cmd in REQUIRED_COMMANDS:
             if not shutil.which(cmd):
                 raise ConfigError(f"Required command '{cmd}' not found in PATH.")
 
-        # --- Validate numeric types ---
         numeric_keys = {
             "robocode.instances": int,
             "robocode.tps": int,
@@ -256,17 +253,14 @@ class Config:
         for key_path, num_type in numeric_keys.items():
             try:
                 value = self.get(key_path)
-                if value is None:  # Should be caught by initial check, but safeguard
+                if value is None:
                     raise ConfigError(f"Numeric config key '{key_path}' is missing.")
-                # Attempt conversion
                 converted = num_type(value)
-                # Store the converted value back for consistency
                 keys = key_path.split(".")
                 d = self.data
                 for k in keys[:-1]:
                     d = d[k]
                 d[keys[-1]] = converted
-
             except (ValueError, TypeError):
                 raise ConfigError(
                     f"Invalid numeric value for '{key_path}': Expected {num_type.__name__}, got '{value}'."
@@ -276,23 +270,20 @@ class Config:
                     f"Configuration key '{key_path}' not found during numeric validation."
                 )
 
-        # --- Validate boolean types ---
         boolean_keys = ["robocode.gui", "tensorboard.bind_all"]
         for key_path in boolean_keys:
-            value = self.get(key_path)
-            if not isinstance(value, bool):
-                # Try common string conversions
-                if isinstance(value, str):
+            try:
+                value = self.get(key_path)
+                if isinstance(value, bool):
+                    continue
+                elif isinstance(value, str):
                     val_lower = value.lower()
-                    if val_lower == "true":
+                    if val_lower in ("true", "1", "yes"):
                         bool_val = True
-                    elif val_lower == "false":
+                    elif val_lower in ("false", "0", "no"):
                         bool_val = False
                     else:
-                        raise ConfigError(
-                            f"Invalid boolean value for '{key_path}': Expected true/false, got '{value}'."
-                        )
-                    # Store converted value
+                        raise ValueError("Not 'true' or 'false'")
                     keys = key_path.split(".")
                     d = self.data
                     for k in keys[:-1]:
@@ -300,8 +291,16 @@ class Config:
                     d[keys[-1]] = bool_val
                 else:
                     raise ConfigError(
-                        f"Invalid boolean value for '{key_path}': Expected true/false, got '{value}'."
+                        f"Invalid boolean value for '{key_path}': Expected true/false or string, got type {type(value).__name__} ('{value}')."
                     )
+            except (ValueError, TypeError):
+                raise ConfigError(
+                    f"Invalid boolean value for '{key_path}': Could not convert '{value}' to boolean."
+                )
+            except KeyError:
+                raise ConfigError(
+                    f"Configuration key '{key_path}' not found during boolean validation."
+                )
 
         log.info("Configuration loaded and validated successfully.")
 
@@ -311,27 +310,29 @@ class Config:
         value = self.data
         try:
             for key in keys:
-                if not isinstance(value, dict):  # Ensure we are traversing dicts
-                    log.warning(
-                        f"Attempted to access key '{key}' on non-dictionary value while getting '{key_path}'"
+                if not isinstance(value, dict):
+                    log.debug(
+                        f"Attempted to access key '{key}' on non-dictionary value '{value}' while getting '{key_path}'"
                     )
                     return default
                 value = value[key]
             return value
         except KeyError:
+            log.debug(
+                f"Key '{key_path}' not found in config, returning default: {default}"
+            )
             return default
 
     def get_path(self, key: str) -> Optional[Path]:
-        """Gets a resolved path."""
+        """Gets a resolved path stored during _derive_paths."""
         return self.paths.get(key)
 
     def get_opponents_list(self) -> List[str]:
         """Gets opponents as a list of strings. Handles list or space-separated string."""
-        opponents_val = self.get("robocode.opponents", [])  # Default to empty list
+        opponents_val = self.get("robocode.opponents", [])
         if isinstance(opponents_val, str):
             return [o.strip() for o in opponents_val.split() if o.strip()]
         elif isinstance(opponents_val, list):
-            # Filter out potential empty strings/None from YAML list
             return [str(o).strip() for o in opponents_val if o and str(o).strip()]
         else:
             log.warning(
@@ -340,10 +341,9 @@ class Config:
             return []
 
     def get_my_robot_details(self) -> Dict[str, str]:
-        """Parses the robot name into components."""
+        """Parses the robot name into components (useful for messages/checks)."""
         full_name = self.get("robocode.my_robot_name", "")
         if not full_name:
-            # This should be caught by validation, but defensive check
             raise ConfigError("robocode.my_robot_name is not configured.")
 
         name_no_star = full_name.rstrip("*")
@@ -351,12 +351,11 @@ class Config:
         if "." in name_no_star:
             package_name = name_no_star.rpartition(".")[0]
             class_name = name_no_star.rpartition(".")[-1]
-            # Use os.path.sep for platform independence in path
             package_path = package_name.replace(".", os.path.sep)
         else:
             package_name = ""
             class_name = name_no_star
-            package_path = ""  # No package path if no package name
+            package_path = ""
 
         class_file = f"{class_name}.class"
 
@@ -365,12 +364,14 @@ class Config:
             "name_no_star": name_no_star,
             "package_name": package_name,
             "class_name": class_name,
-            "package_path": package_path,  # e.g., lk/
-            "class_file": class_file,  # e.g., PlatoRobot.class
+            "package_path": package_path,
+            "class_file": class_file,
         }
 
     def get_server_script_path(self) -> Path:
         """Gets the absolute path to the server script."""
         server_dir = self.get_path("server_dir")
+        if not server_dir:
+            raise ConfigError("Server directory path not resolved.")
         script_name = self.get("server.script_name", DEFAULT_SERVER_SCRIPT)
         return (server_dir / script_name).resolve()
