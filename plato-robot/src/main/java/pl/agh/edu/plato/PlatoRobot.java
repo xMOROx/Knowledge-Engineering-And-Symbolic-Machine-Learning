@@ -1,12 +1,10 @@
-package lk;
+package pl.agh.edu.plato;
 
 import java.io.File;
-import java.util.Arrays;
 import java.util.Random;
 
 import robocode.AdvancedRobot;
 import robocode.DeathEvent;
-import robocode.RoundEndedEvent;
 import robocode.ScannedRobotEvent;
 import robocode.WinEvent;
 import robocode.HitWallEvent;

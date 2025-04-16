@@ -1,4 +1,4 @@
-package lk;
+package pl.agh.edu.plato;
 
 import java.io.File;
 import java.net.URI;
