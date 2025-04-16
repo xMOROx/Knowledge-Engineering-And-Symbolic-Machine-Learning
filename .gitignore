@@ -5,5 +5,7 @@
 */**/lib/**/*
 */**/.settings/**/*
 /logs/**/*
-*.hdf5
 /config/*.properties
+*.hdf5
+.project
+.classpath
