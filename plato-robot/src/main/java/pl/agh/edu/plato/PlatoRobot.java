@@ -1,8 +1,8 @@
 package pl.agh.edu.plato;
 
-import java.io.File;
-import java.util.Random;
-
+import org.apache.commons.io.FileUtils;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import pl.agh.edu.plato.config.ConfigLoadException;
 import pl.agh.edu.plato.config.ConfigLoader;
 import pl.agh.edu.plato.config.RobotConfig;
@@ -12,14 +12,23 @@ import robocode.HitWallEvent;
 import robocode.ScannedRobotEvent;
 import robocode.WinEvent;
 
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.Random;
+
 public class PlatoRobot extends AdvancedRobot {
+
+  private static final Logger logger = LoggerFactory.getLogger(PlatoRobot.class);
 
   private RobotConfig config;
   private String weightServerUrl;
+  private String modelFileName = "network_weights.onnx";
 
   StateReporter stateReporter;
   Network network;
-  File networkFile;
+  Path modelDirectory;
   String robotId;
   State previousState = null;
   State currentState = null;
@@ -45,7 +54,7 @@ public class PlatoRobot extends AdvancedRobot {
         case 5:
           return NOTHING;
         default:
-          System.err.println("[PlatoRobot] Warning: Invalid action index: " + x);
+          logger.warn("Invalid action index: {}", x);
           return NOTHING;
       }
     }
@@ -53,50 +62,49 @@ public class PlatoRobot extends AdvancedRobot {
 
   @Override
   public void run() {
-    out.println("[PlatoRobot] --- RUN() METHOD STARTED ---");
-    out.flush();
+    logger.info("--- RUN() METHOD STARTED ---");
 
     try {
       this.config = ConfigLoader.loadConfig();
       this.weightServerUrl = "http://" + config.server.ip + ":" + config.server.weightPort;
-      out.println("[PlatoRobot] Configuration loaded.");
-      out.println("[PlatoRobot] Config - Server: " + config.server.ip + ":" + config.server.weightPort + "/"
-          + config.server.learningPort);
-      out.println("[PlatoRobot] Config - Epsilon: " + config.rl.explorationEpsilon);
+      logger.info("Configuration loaded.");
+      logger.info("Config - Server: {}:{}/{}", config.server.ip, config.server.weightPort, config.server.learningPort);
+      logger.info("Config - Epsilon: {}", config.rl.explorationEpsilon);
     } catch (ConfigLoadException e) {
-      out.println("[PlatoRobot] FATAL: Configuration loading failed!");
-      e.printStackTrace(out);
-      out.flush();
+      logger.error("FATAL: Configuration loading failed!", e);
       doNothingLoop();
       return;
     } catch (Exception e) {
-      out.println("[PlatoRobot] FATAL: Unexpected error during initial setup!");
-      e.printStackTrace(out);
-      out.flush();
+      logger.error("FATAL: Unexpected error during initial setup!", e);
       doNothingLoop();
       return;
     }
 
     this.robotId = getName() + "_" + System.identityHashCode(this);
-    out.println("[PlatoRobot] Robot instance ID: " + this.robotId);
-    out.flush();
+    logger.info("Robot instance ID: {}", this.robotId);
 
     try {
+      this.modelDirectory = this.getDataDirectory().toPath().resolve("model_" + this.robotId);
+      if (!Files.exists(modelDirectory)) {
+        Files.createDirectories(modelDirectory);
+        logger.info("Created model directory: {}", modelDirectory.toAbsolutePath());
+      } else {
+        logger.info("Using existing model directory: {}", modelDirectory.toAbsolutePath());
+        FileUtils.cleanDirectory(modelDirectory.toFile());
+      }
+
       this.stateReporter = new StateReporter(config.server.ip, config.server.learningPort);
       this.network = new Network();
-      this.networkFile = this.getDataFile("network_" + this.robotId + ".hdf5");
 
-      out.println("[PlatoRobot] Performing initial network download from " + this.weightServerUrl);
-      out.flush();
-      boolean loaded = this.network.downloadNetwork(this.weightServerUrl, this.networkFile);
+      logger.info("Performing initial network download from {}", this.weightServerUrl);
+      boolean loaded = this.network.downloadAndLoadNetwork(this.weightServerUrl, this.modelDirectory,
+          this.modelFileName);
       if (!loaded) {
-        out.println("[PlatoRobot] FATAL: Initial network download failed. Robot cannot function.");
-        out.flush();
+        logger.error("FATAL: Initial network download/load failed. Robot cannot function.");
         doNothingLoop();
         return;
       }
-      out.println("[PlatoRobot] Initial network loaded successfully. Server Updates: " + this.network.updates);
-      out.flush();
+      logger.info("Initial network loaded successfully. Server Updates: {}", this.network.updates);
 
       setAdjustGunForRobotTurn(true);
       setAdjustRadarForGunTurn(true);
@@ -112,25 +120,20 @@ public class PlatoRobot extends AdvancedRobot {
         execute();
       }
     } catch (Throwable t) {
-      out.println("[PlatoRobot] FATAL ERROR in run() or main loop:");
-      out.flush();
-      t.printStackTrace(out);
-      out.flush();
+      logger.error("FATAL ERROR in run() or main loop:", t);
       cleanup();
     }
   }
 
   private void doNothingLoop() {
-    out.println("[PlatoRobot] Entering do-nothing loop (initialization failed).");
-    out.flush();
+    logger.warn("Entering do-nothing loop (initialization failed).");
     while (true) {
       try {
         setTurnRadarRight(360);
         execute();
         Thread.sleep(50);
       } catch (Exception e) {
-        out.println("[PlatoRobot] Error in doNothingLoop execute: " + e.getMessage());
-        out.flush();
+        logger.error("Error in doNothingLoop execute: {}", e.getMessage());
         try {
           Thread.sleep(100);
         } catch (InterruptedException ie) {
@@ -141,76 +144,75 @@ public class PlatoRobot extends AdvancedRobot {
   }
 
   private void reloadNetwork() {
-    out.println("[PlatoRobot] Attempting network reload at time: " + getTime());
-    out.flush();
-    if (this.networkFile == null) {
-      out.println("[PlatoRobot] Warning: networkFile is null during reload attempt. Reinitializing path.");
-      out.flush();
-      this.networkFile = this.getDataFile("network_" + this.robotId + ".hdf5");
+    logger.info("Attempting network reload at time: {}", getTime());
+    if (this.modelDirectory == null) {
+      logger.warn("modelDirectory is null during reload attempt. Reinitializing path.");
+      this.modelDirectory = this.getDataDirectory().toPath().resolve("model_" + this.robotId);
+      try {
+        if (!Files.exists(modelDirectory)) {
+          Files.createDirectories(modelDirectory);
+        }
+      } catch (IOException e) {
+        logger.error("Failed to create model directory during reload attempt: {}", e.getMessage());
+        return;
+      }
     }
-    if (this.networkFile.exists()) {
-      if (!this.networkFile.delete()) {
-        out.println(
-            "[PlatoRobot] Warning: Could not delete old network file before reload: " + this.networkFile.getName());
-        out.flush();
+
+    File modelFile = modelDirectory.resolve(modelFileName).toFile();
+    if (modelFile.exists()) {
+      if (!modelFile.delete()) {
+        logger.warn("Could not delete old model file before reload: {}", modelFile.getName());
       }
     }
 
     if (this.network != null) {
-      boolean success = this.network.downloadNetwork(this.weightServerUrl, this.networkFile);
+      boolean success = this.network.downloadAndLoadNetwork(this.weightServerUrl, this.modelDirectory,
+          this.modelFileName);
       if (success) {
-        out.println("[PlatoRobot] Network reloaded successfully at time " + getTime() + " with " + this.network.updates
-            + " server updates.");
-        out.flush();
+        logger.info("Network reloaded successfully at time {} with {} server updates.", getTime(),
+            this.network.updates);
       } else {
-        out.println(
-            "[PlatoRobot] Warning: Network reload failed at time " + getTime() + ". Continuing with previous network.");
-        out.flush();
+        logger.warn("Network reload failed at time {}. Continuing with previous network (if loaded).", getTime());
       }
     } else {
-      out.println("[PlatoRobot] Error: Network object is null during reload attempt.");
-      out.flush();
+      logger.error("Network object is null during reload attempt.");
     }
   }
 
   public void performAction() {
     if (this.currentState == null) {
-      out.println("[PlatoRobot] Skipping action @ " + getTime() + ": currentState is null (waiting for first scan).");
-      out.flush();
+      logger.debug("Skipping action @ {}: currentState is null (waiting for first scan).", getTime());
       setTurnRadarRight(360);
       return;
     }
-    if (this.network == null || this.network.getQNetwork() == null) {
-      out.println("[PlatoRobot] Warning: Skipping action @ " + getTime() + ": network not available/loaded.");
-      out.flush();
+    if (this.network == null || !this.network.isLoaded()) {
+      logger.warn("Skipping action @ {}: network not available/loaded.", getTime());
       this.lastActionChosen = Action.NOTHING;
       this.rewardReceived = 0.0;
       return;
     }
 
     if (this.previousState != null && this.stateReporter != null) {
-      out.printf("[PlatoRobot] Recording non-terminal transition @ %d for Action: %s, Reward: %.3f\n",
+      logger.debug("Recording non-terminal transition @ {} for Action: {}, Reward: {:.3f}",
           getTime(), this.lastActionChosen, this.rewardReceived);
-      out.flush();
       this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(),
           (float) this.rewardReceived, this.currentState, false);
     } else if (this.previousState == null) {
-      out.println("[PlatoRobot] Skipping recording first transition (previousState is null) @ " + getTime());
-      out.flush();
+      logger.debug("Skipping recording first transition (previousState is null) @ {}", getTime());
     }
 
     double[] inputs = {
-        this.currentState.agentHeading, this.currentState.agentEnergy, this.currentState.agentGunHeat,
-        this.currentState.agentX, this.currentState.agentY, this.currentState.opponentBearing,
-        this.currentState.opponentEnergy, this.currentState.distance
+        (double) this.currentState.agentHeading, (double) this.currentState.agentEnergy,
+        (double) this.currentState.agentGunHeat,
+        (double) this.currentState.agentX, (double) this.currentState.agentY,
+        (double) this.currentState.opponentBearing,
+        (double) this.currentState.opponentEnergy, (double) this.currentState.distance
     };
 
     double[] qValues = this.network.evaluate(inputs);
     int expectedActionCount = Action.values().length;
     if (qValues == null || qValues.length != expectedActionCount) {
-      out.println(
-          "[PlatoRobot] ERROR: Invalid Q-values received @ " + getTime() + ". Performing default action (NOTHING).");
-      out.flush();
+      logger.error("Invalid Q-values received @ {}. Performing default action (NOTHING).", getTime());
       this.lastActionChosen = Action.NOTHING;
       this.rewardReceived = 0.0;
       setAhead(0);
@@ -222,9 +224,7 @@ public class PlatoRobot extends AdvancedRobot {
     if (randomGenerator.nextDouble() < config.rl.explorationEpsilon) {
       int randomIndex = randomGenerator.nextInt(expectedActionCount);
       actionToTake = Action.fromInteger(randomIndex);
-      out.println("[PlatoRobot] Action @ " + getTime() + " (Random - eps=" + config.rl.explorationEpsilon + "): "
-          + actionToTake);
-      out.flush();
+      logger.debug("Action @ {} (Random - eps={}): {}", getTime(), config.rl.explorationEpsilon, actionToTake);
     } else {
       int bestActionIndex = 0;
       double maxQ = -Double.MAX_VALUE;
@@ -235,12 +235,10 @@ public class PlatoRobot extends AdvancedRobot {
         }
       }
       actionToTake = Action.fromInteger(bestActionIndex);
-      out.printf("[PlatoRobot] Action @ %d (Greedy): %s (MaxQ: %.4f)\n", getTime(), actionToTake, maxQ);
-      out.flush();
+      logger.debug("Action @ {} (Greedy): {} (MaxQ: {:.4f})", getTime(), actionToTake, maxQ);
     }
 
-    out.println("[PlatoRobot] Queuing action: " + actionToTake + " @ " + getTime());
-    out.flush();
+    logger.debug("Queuing action: {} @ {}", actionToTake, getTime());
     switch (actionToTake) {
       case FORWARD:
         setAhead(100);
@@ -258,8 +256,7 @@ public class PlatoRobot extends AdvancedRobot {
         if (getGunHeat() == 0 && getEnergy() > 0.1) {
           setFire(1);
         } else {
-          out.println("[PlatoRobot] Action FIRE chosen, but gun hot/low energy. Skipping fire.");
-          out.flush();
+          logger.debug("Action FIRE chosen, but gun hot/low energy. Skipping fire.");
         }
         break;
       case NOTHING:
@@ -272,8 +269,7 @@ public class PlatoRobot extends AdvancedRobot {
     this.rewardReceived = 0.0;
     this.previousState = this.currentState;
     this.currentState = null;
-    out.println("[PlatoRobot] Action " + this.lastActionChosen + " queued. Shifted states. Waiting for next scan.");
-    out.flush();
+    logger.debug("Action {} queued. Shifted states. Waiting for next scan.", this.lastActionChosen);
   }
 
   @Override
@@ -293,9 +289,8 @@ public class PlatoRobot extends AdvancedRobot {
         double actualEnergyChange = opponentEnergyChangeScaled * 10.0;
         double hitReward = actualEnergyChange * config.rewards.hitMultiplier;
         reward += hitReward;
-        out.printf("[PlatoRobot] Reward Calc @ %d: Opponent Hit! ScaledDelta=%.3f, Reward+=%.3f\n", getTime(),
+        logger.debug("Reward Calc @ {}: Opponent Hit! ScaledDelta={:.3f}, Reward+={:.3f}", getTime(),
             opponentEnergyChangeScaled, hitReward);
-        out.flush();
       }
 
       double selfEnergyChangeScaled = newState.agentEnergy - this.previousState.agentEnergy;
@@ -303,9 +298,8 @@ public class PlatoRobot extends AdvancedRobot {
         double actualEnergyLost = -selfEnergyChangeScaled * 10.0;
         double hitPenalty = -actualEnergyLost * config.rewards.penaltyGotHitMultiplier;
         reward += hitPenalty;
-        out.printf("[PlatoRobot] Reward Calc @ %d: Got Hit! ScaledDelta=%.3f, Reward+=%.3f\n", getTime(),
+        logger.debug("Reward Calc @ {}: Got Hit! ScaledDelta={:.3f}, Reward+={:.3f}", getTime(),
             selfEnergyChangeScaled, hitPenalty);
-        out.flush();
       }
     }
 
@@ -315,10 +309,8 @@ public class PlatoRobot extends AdvancedRobot {
     }
 
     this.rewardReceived += reward;
-    out.printf(
-        "[PlatoRobot] Scan processed @ %d. Updated currentState. Cycle reward = %.3f. Total pending reward = %.3f\n",
+    logger.debug("Scan processed @ {}. Updated currentState. Cycle reward = {:.3f}. Total pending reward = {:.3f}",
         getTime(), reward, this.rewardReceived);
-    out.flush();
 
     double absoluteBearingRadians = getHeadingRadians() + event.getBearingRadians();
     double gunTurnRadians = robocode.util.Utils.normalRelativeAngle(absoluteBearingRadians - getGunHeadingRadians());
@@ -327,18 +319,15 @@ public class PlatoRobot extends AdvancedRobot {
 
   @Override
   public void onHitWall(HitWallEvent event) {
-    out.println("[PlatoRobot] --- ONHITWALL EVENT at time " + getTime() + " ---");
-    out.flush();
+    logger.debug("--- ONHITWALL EVENT at time {} ---", getTime());
     this.rewardReceived -= config.rewards.penaltyHitWall;
-    out.printf("[PlatoRobot] Hit wall penalty applied (-%.3f). Current rewardReceived = %.3f\n",
+    logger.debug("Hit wall penalty applied (-{:.3f}). Current rewardReceived = {:.3f}",
         config.rewards.penaltyHitWall, this.rewardReceived);
-    out.flush();
   }
 
   @Override
   public void onDeath(DeathEvent event) {
-    out.println("[PlatoRobot] --- ONDEATH EVENT at time " + getTime() + " ---");
-    out.flush();
+    logger.info("--- ONDEATH EVENT at time {} ---", getTime());
     State finalState = null;
     try {
       if (this.currentState != null) {
@@ -348,11 +337,10 @@ public class PlatoRobot extends AdvancedRobot {
       } else {
         finalState = new State((float) getHeading(), (float) getEnergy(), (float) getGunHeat(), (float) getX(),
             (float) getY(), 0.0f, 0.0f, 0.0f);
-        out.println("[PlatoRobot] Warning: Using fallback final state in onDeath.");
+        logger.warn("Using fallback final state in onDeath.");
       }
     } catch (Exception e) {
-      out.println("[PlatoRobot] Error creating final state in onDeath: " + e.getMessage());
-      out.flush();
+      logger.error("Error creating final state in onDeath: {}", e.getMessage());
       if (stateReporter != null)
         stateReporter.close();
       cleanup();
@@ -361,17 +349,14 @@ public class PlatoRobot extends AdvancedRobot {
 
     if (this.stateReporter != null && this.previousState != null) {
       float finalReward = (float) (this.rewardReceived - config.rewards.penaltyDeath);
-      out.printf(
-          "[PlatoRobot] Recording final transition (DEATH) for action %s. BaseReward=%.3f, DeathPenalty=%.3f, FinalReward=%.3f\n",
+      logger.info(
+          "Recording final transition (DEATH) for action {}. BaseReward={:.3f}, DeathPenalty={:.3f}, FinalReward={:.3f}",
           this.lastActionChosen, this.rewardReceived, config.rewards.penaltyDeath, finalReward);
-      out.flush();
       this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(), finalReward, finalState,
           true);
-      out.println("[PlatoRobot] Final DEATH transition sent.");
-      out.flush();
+      logger.info("Final DEATH transition sent.");
     } else {
-      out.println("[PlatoRobot] Cannot send final DEATH transition: stateReporter or previousState is null.");
-      out.flush();
+      logger.warn("Cannot send final DEATH transition: stateReporter or previousState is null.");
     }
 
     if (this.stateReporter != null) {
@@ -382,8 +367,7 @@ public class PlatoRobot extends AdvancedRobot {
 
   @Override
   public void onWin(WinEvent event) {
-    out.println("[PlatoRobot] --- ONWIN EVENT at time " + getTime() + " ---");
-    out.flush();
+    logger.info("--- ONWIN EVENT at time {} ---", getTime());
     State finalState = null;
     try {
       if (this.currentState != null) {
@@ -393,11 +377,10 @@ public class PlatoRobot extends AdvancedRobot {
       } else {
         finalState = new State((float) getHeading(), (float) getEnergy(), (float) getGunHeat(), (float) getX(),
             (float) getY(), 0.0f, 0.0f, 0.0f);
-        out.println("[PlatoRobot] Warning: Using fallback final state in onWin.");
+        logger.warn("Using fallback final state in onWin.");
       }
     } catch (Exception e) {
-      out.println("[PlatoRobot] Error creating final state in onWin: " + e.getMessage());
-      out.flush();
+      logger.error("Error creating final state in onWin: {}", e.getMessage());
       if (stateReporter != null)
         stateReporter.close();
       cleanup();
@@ -406,17 +389,14 @@ public class PlatoRobot extends AdvancedRobot {
 
     if (this.stateReporter != null && this.previousState != null) {
       float finalReward = (float) (this.rewardReceived + config.rewards.win);
-      out.printf(
-          "[PlatoRobot] Recording final transition (WIN) for action %s. BaseReward=%.3f, WinReward=%.3f, FinalReward=%.3f\n",
+      logger.info(
+          "Recording final transition (WIN) for action {}. BaseReward={:.3f}, WinReward={:.3f}, FinalReward={:.3f}",
           this.lastActionChosen, this.rewardReceived, config.rewards.win, finalReward);
-      out.flush();
       this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(), finalReward, finalState,
           true);
-      out.println("[PlatoRobot] Final WIN transition sent.");
-      out.flush();
+      logger.info("Final WIN transition sent.");
     } else {
-      out.println("[PlatoRobot] Cannot send final WIN transition: stateReporter or previousState is null.");
-      out.flush();
+      logger.warn("Cannot send final WIN transition: stateReporter or previousState is null.");
     }
 
     if (this.stateReporter != null) {
@@ -426,15 +406,19 @@ public class PlatoRobot extends AdvancedRobot {
   }
 
   private void cleanup() {
-    out.println("[PlatoRobot] Performing cleanup...");
-    out.flush();
-    if (this.networkFile != null && this.networkFile.exists()) {
-      if (this.networkFile.delete()) {
-        out.println("[PlatoRobot] Deleted network file: " + this.networkFile.getName());
-        out.flush();
-      } else {
-        out.println("[PlatoRobot] Warning: Failed to delete network file on cleanup: " + this.networkFile.getName());
-        out.flush();
+    logger.info("Performing cleanup...");
+
+    if (this.network != null) {
+      this.network.close();
+    }
+
+    if (this.modelDirectory != null && Files.exists(this.modelDirectory)) {
+      try {
+        FileUtils.deleteDirectory(this.modelDirectory.toFile());
+        logger.info("Deleted model directory: {}", this.modelDirectory.toAbsolutePath());
+      } catch (IOException e) {
+        logger.warn("Warning: Failed to delete model directory on cleanup: {}", this.modelDirectory.toAbsolutePath(),
+            e);
       }
     }
 
@@ -444,7 +428,6 @@ public class PlatoRobot extends AdvancedRobot {
     this.stateReporter = null;
     this.config = null;
 
-    out.println("[PlatoRobot] Cleanup finished.");
-    out.flush();
+    logger.info("Cleanup finished.");
   }
 }

@@ -1,268 +1,214 @@
 package pl.agh.edu.plato;
 
-import java.io.File;
-import java.net.URI;
-import java.nio.file.NoSuchFileException;
-
+import ai.djl.Device;
+import ai.djl.MalformedModelException;
+import ai.djl.inference.Predictor;
+import ai.djl.ndarray.NDArray;
+import ai.djl.ndarray.NDList;
+import ai.djl.ndarray.NDManager;
+import ai.djl.ndarray.types.DataType;
+import ai.djl.ndarray.types.Shape;
+import ai.djl.repository.zoo.Criteria;
+import ai.djl.repository.zoo.ModelNotFoundException;
+import ai.djl.repository.zoo.ZooModel;
+import ai.djl.translate.TranslateException;
+import ai.djl.translate.Translator;
+import ai.djl.translate.TranslatorContext;
 import org.apache.commons.io.FileUtils;
-import org.neuroph.core.Connection;
-import org.neuroph.core.Layer;
-import org.neuroph.core.NeuralNetwork;
-import org.neuroph.core.Neuron;
-import org.neuroph.core.Weight;
-import org.neuroph.core.transfer.RectifiedLinear;
-import org.neuroph.core.transfer.TransferFunction;
-import org.neuroph.core.transfer.Linear;
-import org.neuroph.nnet.MultiLayerPerceptron;
-import org.neuroph.nnet.comp.neuron.BiasNeuron;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
-import io.jhdf.HdfFile;
-import io.jhdf.api.Attribute;
-import io.jhdf.api.Dataset;
-import io.jhdf.api.Node;
+import java.io.File;
+import java.io.IOException;
+import java.net.HttpURLConnection;
+import java.net.URI;
+import java.net.URISyntaxException;
+import java.nio.FloatBuffer;
+import java.nio.file.Path;
+import java.util.Arrays;
 
 public class Network {
 
+  private static final Logger logger = LoggerFactory.getLogger(Network.class);
+
   private static final int INPUT_NEURONS = 8;
-  private static final int HIDDEN1_NEURONS = 32;
-  private static final int HIDDEN2_NEURONS = 32;
   private static final int OUTPUT_NEURONS = 6;
+  private static final String MODEL_UPDATE_HEADER = "X-Model-Updates";
 
-  private static final String FC1_WEIGHT_PATH = "/fc1/weight";
-  private static final String FC1_BIAS_PATH = "/fc1/bias";
-  private static final String FC2_WEIGHT_PATH = "/fc2/weight";
-  private static final String FC2_BIAS_PATH = "/fc2/bias";
-  private static final String OUT_WEIGHT_PATH = "/out/weight";
-  private static final String OUT_BIAS_PATH = "/out/bias";
-  private static final String UPDATES_ATTR = "updates";
-
-  private NeuralNetwork<?> qNetwork;
-  public int updates = 0;
+  private ZooModel<NDList, NDList> model;
+  private Predictor<NDList, NDList> predictor;
+  public int updates = -1;
+  private boolean isLoaded = false;
 
   public double[] evaluate(double[] input) {
-    if (qNetwork == null) {
-      System.err.println("[Network] ERROR: qNetwork is null in evaluate(). Returning zeros.");
-
-      double[] defaultOutput = new double[OUTPUT_NEURONS];
-      java.util.Arrays.fill(defaultOutput, 0.0);
-      return defaultOutput;
+    if (!isLoaded || predictor == null) {
+      logger.error("Network not loaded or predictor is null. Cannot evaluate. Returning zeros.");
+      return createDefaultOutput();
     }
     if (input == null || input.length != INPUT_NEURONS) {
-      System.err.println("[Network] ERROR: Invalid input provided to evaluate(). Input is "
-          + (input == null ? "null" : "array len " + input.length)
-          + ", expected len " + INPUT_NEURONS + ". Returning zeros.");
-      double[] defaultOutput = new double[OUTPUT_NEURONS];
-      java.util.Arrays.fill(defaultOutput, 0.0);
-      return defaultOutput;
+      logger.error("Invalid input provided to evaluate(). Input is {}, expected len {}. Returning zeros.",
+          (input == null ? "null" : "array len " + input.length), INPUT_NEURONS);
+      return createDefaultOutput();
     }
-    try {
-      qNetwork.setInput(input);
-      qNetwork.calculate();
-      return qNetwork.getOutput();
+
+    try (NDManager manager = model.getNDManager().newSubManager()) {
+      float[] floatInput = new float[input.length];
+      for (int i = 0; i < input.length; i++) {
+        floatInput[i] = (float) input[i];
+      }
+
+      Shape inputShape = new Shape(INPUT_NEURONS);
+
+      NDArray inputArray = manager.create(FloatBuffer.wrap(floatInput), inputShape, DataType.FLOAT32);
+      NDList inputList = new NDList(inputArray);
+
+      NDList outputList = predictor.predict(inputList);
+      try (NDList autoCloseOutputList = outputList) {
+        NDArray outputArray = autoCloseOutputList.singletonOrThrow();
+        float[] result = outputArray.toFloatArray();
+
+        double[] doubleResult = new double[result.length];
+        for (int i = 0; i < result.length; i++) {
+          doubleResult[i] = result[i];
+        }
+
+        if (doubleResult.length != OUTPUT_NEURONS) {
+          logger.error("Output length mismatch. Expected {}, got {}. NDArray shape was {}. Returning zeros.",
+              OUTPUT_NEURONS, doubleResult.length, outputArray.getShape());
+          return createDefaultOutput();
+        }
+        return doubleResult;
+      }
+
+    } catch (TranslateException e) {
+      Throwable cause = e.getCause();
+      if (cause instanceof ai.djl.engine.EngineException && cause.getCause() instanceof ai.onnxruntime.OrtException) {
+        ai.onnxruntime.OrtException ortEx = (ai.onnxruntime.OrtException) cause.getCause();
+        logger.error("ONNX Runtime Exception during evaluation: {} - {}", ortEx.getCode(), ortEx.getMessage(), e);
+      } else if (cause instanceof UnsupportedOperationException
+          && cause.getMessage().contains("NDArray implementation")) {
+        logger.error(
+            "Evaluation failed due to UnsupportedOperationException in NDArray (likely batching/stacking). NDManager or Batchifier issue?",
+            e);
+      } else {
+        logger.error("Error during DJL prediction/translation:", e);
+      }
+      return createDefaultOutput();
     } catch (Exception e) {
-      System.err.println("[Network] ERROR during Neuroph calculate/getOutput:");
-      e.printStackTrace();
-      double[] defaultOutput = new double[OUTPUT_NEURONS];
-      java.util.Arrays.fill(defaultOutput, 0.0);
-      return defaultOutput;
+      logger.error("Unexpected error during evaluation:", e);
+      return createDefaultOutput();
     }
   }
 
-  public NeuralNetwork<?> getQNetwork() {
-    return qNetwork;
+  private double[] createDefaultOutput() {
+    double[] defaultOutput = new double[OUTPUT_NEURONS];
+    Arrays.fill(defaultOutput, 0.0);
+    return defaultOutput;
   }
 
-  public boolean downloadNetwork(String weightServerUrl, File targetDataFile) {
-    boolean success = false;
+  public boolean downloadAndLoadNetwork(String weightServerUrl, Path modelDirectory, String modelName) {
     long downloadTime = -1;
     long loadTime = -1;
+    int downloadedUpdates = -1;
+    File targetModelFile = modelDirectory.resolve(modelName).toFile();
 
     try {
-      System.out.println("[Network] Attempting download: " + weightServerUrl + " -> " + targetDataFile.getName());
+      close();
+      isLoaded = false;
 
+      logger.info("Attempting download: {} -> {}", weightServerUrl, targetModelFile.getAbsolutePath());
       long startDownload = System.currentTimeMillis();
 
-      FileUtils.copyURLToFile(new URI(weightServerUrl).toURL(), targetDataFile, 5000, 10000);
+      URI uri = new URI(weightServerUrl);
+      HttpURLConnection connection = (HttpURLConnection) uri.toURL().openConnection();
+      connection.setConnectTimeout(5000);
+      connection.setReadTimeout(10000);
+      String updatesHeader = connection.getHeaderField(MODEL_UPDATE_HEADER);
+      if (updatesHeader != null) {
+        try {
+          downloadedUpdates = Integer.parseInt(updatesHeader);
+          logger.info("Received model update count from header: {}", downloadedUpdates);
+        } catch (NumberFormatException e) {
+          logger.error("Failed to parse update count from header '{}': {}", updatesHeader, e.getMessage());
+          return false;
+        }
+      } else {
+        logger.warn("No '{}' header found in response from {}.", MODEL_UPDATE_HEADER, weightServerUrl);
+        return false;
+      }
+      FileUtils.copyURLToFile(uri.toURL(), targetModelFile, 5000, 10000);
       downloadTime = System.currentTimeMillis() - startDownload;
-      System.out.println("[Network] Download successful (" + downloadTime + " ms): " + targetDataFile.getName());
+      logger.info("Download successful ({} ms): {}", downloadTime, targetModelFile.getName());
 
       long startLoad = System.currentTimeMillis();
-      try (HdfFile hdfFile = new HdfFile(targetDataFile)) {
-        System.out.println("[Network] HDF5 file opened: " + targetDataFile.getName());
 
-        Attribute updatesAttr = hdfFile.getAttribute(UPDATES_ATTR);
-        if (updatesAttr == null) {
-          System.err.println("[Network] ERROR: HDF5 file missing '" + UPDATES_ATTR + "' attribute.");
-          return false;
-        }
+      Criteria<NDList, NDList> criteria = Criteria.builder()
+          .setTypes(NDList.class, NDList.class)
+          .optModelPath(modelDirectory)
+          .optModelName(modelName)
+          .optEngine("OnnxRuntime")
+          .optDevice(Device.cpu())
+          .optTranslator(new RobocodeTranslator())
+          .build();
 
-        Node fc1WeightNode = hdfFile.getByPath(FC1_WEIGHT_PATH);
-        if (fc1WeightNode == null || !(fc1WeightNode instanceof Dataset)) {
-          System.err
-              .println("[Network] ERROR: HDF5 file missing or invalid dataset at path '" + FC1_WEIGHT_PATH + "'.");
-          return false;
-        }
+      model = criteria.loadModel();
+      predictor = model.newPredictor();
 
-        this.updates = ((Long) updatesAttr.getData()).intValue();
-        System.out.format("[Network] Loading network '%s' with %d server updates.%n", targetDataFile.getName(),
-            this.updates);
-
-        this.qNetwork = new MultiLayerPerceptron(INPUT_NEURONS, HIDDEN1_NEURONS, HIDDEN2_NEURONS, OUTPUT_NEURONS);
-        System.out.println("[Network] Neuroph MLP created/recreated.");
-
-        try {
-          float[][] fc1Weights = (float[][]) hdfFile.getDatasetByPath(FC1_WEIGHT_PATH).getData();
-          float[] fc1Bias = (float[]) hdfFile.getDatasetByPath(FC1_BIAS_PATH).getData();
-          setupLayer(this.qNetwork.getLayerAt(1), fc1Weights, fc1Bias, new RectifiedLinear());
-          System.out.println("[Network] Layer fc1 setup complete.");
-        } catch (Exception eLayer1) {
-          System.err.println("[Network] ERROR setting up Layer 1 (fc1):");
-          eLayer1.printStackTrace();
-          this.qNetwork = null;
-          return false;
-        }
-
-        try {
-          float[][] fc2Weights = (float[][]) hdfFile.getDatasetByPath(FC2_WEIGHT_PATH).getData();
-          float[] fc2Bias = (float[]) hdfFile.getDatasetByPath(FC2_BIAS_PATH).getData();
-          setupLayer(this.qNetwork.getLayerAt(2), fc2Weights, fc2Bias, new RectifiedLinear());
-          System.out.println("[Network] Layer fc2 setup complete.");
-        } catch (Exception eLayer2) {
-          System.err.println("[Network] ERROR setting up Layer 2 (fc2):");
-          eLayer2.printStackTrace();
-          this.qNetwork = null;
-          return false;
-        }
-
-        try {
-          float[][] outWeights = (float[][]) hdfFile.getDatasetByPath(OUT_WEIGHT_PATH).getData();
-          float[] outBias = (float[]) hdfFile.getDatasetByPath(OUT_BIAS_PATH).getData();
-          setupLayer(this.qNetwork.getLayerAt(3), outWeights, outBias, new Linear());
-          System.out.println("[Network] Layer out setup complete.");
-        } catch (Exception eLayerOut) {
-          System.err.println("[Network] ERROR setting up Layer 3 (out):");
-          eLayerOut.printStackTrace();
-          this.qNetwork = null;
-          return false;
-        }
-
-        success = true;
-      }
       loadTime = System.currentTimeMillis() - startLoad;
-      System.out
-          .println("[Network] Network weights loaded/setup (" + loadTime + " ms). Total updates: " + this.updates);
+      this.updates = downloadedUpdates;
+      this.isLoaded = true;
+      logger.info("DJL ONNX model loaded successfully using OnnxRuntime engine ({} ms). Server Updates: {}", loadTime,
+          this.updates);
+      return true;
 
-    } catch (
-
-    NoSuchFileException e) {
-
-      System.err.println("[Network] ERROR: HDF5 file not found during read: " + targetDataFile.getAbsolutePath() + " - "
-          + e.getMessage());
-      this.qNetwork = null;
-    } catch (java.net.SocketTimeoutException e) {
-      System.err
-          .println("[Network] ERROR: Timeout during network download from " + weightServerUrl + ": " + e.getMessage());
-      this.qNetwork = null;
-    } catch (java.io.IOException e) {
-      System.err.println(
-          "[Network] ERROR: IO error during network download/read from " + weightServerUrl + ": " + e.getMessage());
-
-      this.qNetwork = null;
+    } catch (URISyntaxException e) {
+      logger.error("Invalid weight server URL syntax: {}", weightServerUrl, e);
+    } catch (MalformedModelException e) {
+      logger.error("Malformed model data found at {}:", targetModelFile.getAbsolutePath(), e);
+    } catch (ModelNotFoundException e) {
+      logger.error("Could not find model files at {}:", modelDirectory.toString(), e);
+    } catch (IOException e) {
+      logger.error("IO error during network download/load from {} or file {}:", weightServerUrl,
+          targetModelFile.getAbsolutePath(), e);
     } catch (Exception e) {
-      System.err.println("[Network] ERROR during network download or HDF5 loading:");
-      e.printStackTrace();
-      this.qNetwork = null;
+      logger.error("Unexpected error during network download or DJL loading:", e);
+    } finally {
+      if (!isLoaded) {
+        close();
+        updates = -1;
+        logger.error("downloadAndLoadNetwork finished UNSUCCESSFULLY.");
+      }
     }
-
-    if (!success) {
-      System.err.println("[Network] downloadNetwork finished UNsuccessfully.");
-    }
-    return success;
+    return false;
   }
 
-  private void setupLayer(Layer layer, float[][] weights, float[] biases, TransferFunction function) throws Exception {
-    System.out.println("[Network] Setting up layer: " + layer.getLabel() + " with TransferFunction: "
-        + function.getClass().getSimpleName());
-
-    int neuronsInLayer = 0;
-    for (Neuron n : layer.getNeurons()) {
-      if (!(n instanceof BiasNeuron)) {
-        neuronsInLayer++;
-      }
+  public void close() {
+    logger.info("Closing Network resources (DJL predictor and model).");
+    if (predictor != null) {
+      predictor.close();
+      predictor = null;
     }
-    int expectedNeurons = weights.length;
-    int expectedBiases = biases.length;
-    int expectedInputs = (weights.length > 0) ? weights[0].length : 0;
-
-    System.out.println("[Network] Layer Info: Neuroph neurons (non-bias): " + neuronsInLayer +
-        ", Expected neurons (from weights rows): " + expectedNeurons +
-        ", Expected biases: " + expectedBiases +
-        ", Expected inputs per neuron (from weights cols): " + expectedInputs);
-
-    if (neuronsInLayer != expectedNeurons) {
-      throw new Exception(String.format("Layer neuron count mismatch: Expected %d (weights rows), Neuroph has %d",
-          expectedNeurons, neuronsInLayer));
+    if (model != null) {
+      model.close();
+      model = null;
     }
-    if (expectedNeurons != expectedBiases) {
-      throw new Exception(
-          String.format("Bias count mismatch: Expected %d (neurons), Found %d", expectedNeurons, expectedBiases));
+    isLoaded = false;
+    updates = -1;
+  }
+
+  public boolean isLoaded() {
+    return isLoaded;
+  }
+
+  private static class RobocodeTranslator implements Translator<NDList, NDList> {
+    @Override
+    public NDList processInput(TranslatorContext ctx, NDList input) {
+      return input;
     }
 
-    int neuronIdx = 0;
-    for (Neuron neuron : layer.getNeurons()) {
-
-      if (neuron instanceof BiasNeuron) {
-        System.out.println("[Network] Skipping bias neuron in layer processing.");
-        continue;
-      }
-
-      if (neuronIdx >= weights.length || neuronIdx >= biases.length) {
-        throw new Exception(String.format("Neuron index %d out of bounds for weights/biases arrays (len %d/%d)",
-            neuronIdx, weights.length, biases.length));
-      }
-
-      neuron.setTransferFunction(function);
-
-      int connectionIdx = 0;
-      boolean biasConnectionAssigned = false;
-
-      for (Connection conn : neuron.getInputConnections()) {
-        if (conn.getFromNeuron() instanceof BiasNeuron) {
-
-          conn.setWeight(new Weight((double) biases[neuronIdx]));
-          biasConnectionAssigned = true;
-
-        } else {
-
-          if (connectionIdx >= weights[neuronIdx].length) {
-            throw new Exception(String.format("Connection index %d out of bounds for weights[%d] (len %d)",
-                connectionIdx, neuronIdx, weights[neuronIdx].length));
-          }
-          conn.setWeight(new Weight((double) weights[neuronIdx][connectionIdx]));
-
-          connectionIdx++;
-        }
-      }
-
-      if (!biasConnectionAssigned) {
-
-        System.out.println("[Network] Warning: Neuron " + neuronIdx + " in layer " + layer.getLabel()
-            + " did not find an incoming bias connection during setup.");
-      }
-      if (connectionIdx != expectedInputs) {
-        throw new Exception(String.format(
-            "Connection weight count mismatch for neuron %d: Expected %d (weights[%d] length), Assigned %d",
-            neuronIdx, expectedInputs, neuronIdx, connectionIdx));
-      }
-
-      neuronIdx++;
+    @Override
+    public NDList processOutput(TranslatorContext ctx, NDList list) {
+      return list;
     }
-
-    if (neuronIdx != expectedNeurons) {
-      throw new Exception(String.format("Processed %d non-bias neurons, but expected %d based on weights array.",
-          neuronIdx, expectedNeurons));
-    }
-    System.out
-        .println("[Network] Successfully processed " + neuronIdx + " non-bias neurons for layer " + layer.getLabel());
   }
 }

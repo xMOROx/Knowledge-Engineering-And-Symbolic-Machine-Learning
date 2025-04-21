@@ -7,6 +7,7 @@ import time
 from server import EnvironmentServer, WeightServer
 import torch.multiprocessing as mp
 import colorama
+import torch
 
 
 class ColoredFormatter(logging.Formatter):
@@ -74,8 +75,7 @@ def setup_logging(level_str="INFO"):
     root_logger.info(
         f"Logging level set to: {logging.getLevelName(numeric_level)} ({numeric_level})"
     )
-    logging.getLogger("tensorflow").setLevel(logging.ERROR)
-    logging.getLogger("h5py").setLevel(logging.WARNING)
+    logging.getLogger("onnxruntime").setLevel(logging.WARNING)
 
 
 def main():
@@ -116,8 +116,8 @@ def main():
     )
     parser.add_argument(
         "--weights-file-name",
-        default="network_weights.hdf5",
-        help="Weights file base name (in ./networks/).",
+        default="network_weights.onnx",
+        help="Weights file base name (in ./networks/). Should end with .onnx",
     )
     parser.add_argument(
         "--replay-capacity", type=int, default=10000, help="Replay memory capacity."
@@ -128,18 +128,46 @@ def main():
     parser.add_argument(
         "--log-dir", default="/tmp/plato_logs", help="Directory for TensorBoard logs."
     )
+    parser.add_argument(
+        "--device",
+        type=str,
+        default="auto",
+        choices=["cpu", "cuda", "auto"],
+        help="Device to use for training ('cpu', 'cuda', or 'auto'). Default: auto",
+    )
     args = parser.parse_args()
 
     setup_logging(args.log_level)
     logger = logging.getLogger("Main")
+
+    if args.device == "auto":
+        selected_device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        selected_device = args.device
+
+    if selected_device == "cuda" and not torch.cuda.is_available():
+        logger.warning("CUDA requested but not available. Falling back to CPU.")
+        selected_device = "cpu"
+
+    logger.info(f"Using device: {selected_device}")
+    device = torch.device(selected_device)
 
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         networks_dir = os.path.join(script_dir, "networks")
         os.makedirs(networks_dir, exist_ok=True)
         logger.info(f"Network weights dir: {networks_dir}")
+
+        if not args.weights_file_name.endswith(".onnx"):
+            logger.warning("Weights file name does not end with .onnx. Appending it.")
+            args.weights_file_name += ".onnx"
+
         weights_file_full_path = os.path.join(networks_dir, args.weights_file_name)
-        logger.info(f"Weights file path: {weights_file_full_path}")
+        updates_file_path = weights_file_full_path + ".updates.txt"
+
+        logger.info(f"ONNX Weights file path: {weights_file_full_path}")
+        logger.info(f"Updates file path: {updates_file_path}")
+
         os.makedirs(args.log_dir, exist_ok=True)
         logger.info(f"TensorBoard logs dir: {args.log_dir}")
     except OSError as e:
@@ -150,6 +178,7 @@ def main():
             "Cannot determine script directory (__file__ undefined). Defaulting weights path."
         )
         weights_file_full_path = os.path.abspath(args.weights_file_name)
+        updates_file_path = weights_file_full_path + ".updates.txt"
         os.makedirs(args.log_dir, exist_ok=True)
 
     lock = mp.Lock()
@@ -160,7 +189,8 @@ def main():
         weight_server = WeightServer(
             ip=args.ip,
             port=args.weight_port,
-            filename=weights_file_full_path,
+            onnx_filename=weights_file_full_path,
+            updates_filename=updates_file_path,
             lock=lock,
         )
         weight_server.start()
@@ -171,6 +201,7 @@ def main():
             ip=args.ip,
             port=args.learn_port,
             weights_filename=weights_file_full_path,
+            updates_filename=updates_file_path,
             lock=lock,
             learning_rate=args.lr,
             gamma=args.gamma,
@@ -178,6 +209,7 @@ def main():
             replay_capacity=args.replay_capacity,
             save_frequency=args.save_freq,
             log_dir=args.log_dir,
+            device=device,
         )
         learning_server.start()
     except Exception as e:
@@ -189,8 +221,14 @@ def main():
             f"Received signal {signal.Signals(signum).name}. Initiating shutdown..."
         )
         shutdown_flag.set()
-        logger.info("Shutdown flag set. Main process will exit.")
-        time.sleep(0.5)
+
+        if learning_server:
+            learning_server.shutdown()
+        if weight_server:
+            weight_server.shutdown()
+
+        logger.info("Shutdown flag set. Main process will exit after cleanup.")
+        time.sleep(1)
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
@@ -204,7 +242,7 @@ def main():
             logger.warning(
                 "KeyboardInterrupt caught directly in main loop. Forcing exit."
             )
-            shutdown_flag.set()
+            signal_handler(signal.SIGINT, None)
             sys.exit(0)
 
 

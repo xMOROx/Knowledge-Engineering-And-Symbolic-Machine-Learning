@@ -3,6 +3,7 @@ astunparse==1.6.3
 certifi==2025.1.31
 charset-normalizer==3.4.1
 colorama==0.4.6
+coloredlogs==15.0.1
 filelock==3.18.0
 flatbuffers==25.2.10
 fsspec==2025.3.0
@@ -10,6 +11,7 @@ gast==0.6.0
 google-pasta==0.2.0
 grpcio==1.71.0
 h5py==3.13.0
+humanfriendly==10.0
 idna==3.10
 Jinja2==3.1.6
 keras==3.9.1
@@ -37,6 +39,9 @@ nvidia-cusparselt-cu12==0.6.2
 nvidia-nccl-cu12==2.23.4
 nvidia-nvjitlink-cu12==12.5.82
 nvidia-nvtx-cu12==12.4.127
+onnx==1.17.0
+onnxruntime==1.21.1
+onnxruntime-gpu==1.21.1
 opt_einsum==3.4.0
 optree==0.14.1
 packaging==24.2

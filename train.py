@@ -8,8 +8,6 @@ from typing import Optional
 
 from colorama import Style
 
-import plato_setup
-
 try:
     from plato_setup import (
         SCRIPT_NAME,
@@ -290,7 +288,7 @@ Keys should be under their respective sections (e.g., 'robocode', 'server').
   learn_port:           UDP port for learning data (Required).
   weight_port:          TCP port for weights/control (Required).
   python_exe:           Python executable to run the server (Required, e.g., python3 or /path/to/venv/bin/python).
-  script_name:          Name of the main server script (Optional, default: {plato_setup.constants.DEFAULT_SERVER_SCRIPT}).
+  script_name:          Name of the main server script (Optional, default: {DEFAULT_SERVER_SCRIPT}).
 
 {Style.BRIGHT}logging:{Style.RESET_ALL}
   log_dir:              Directory to store log files (Required). Can be relative or absolute.
@@ -298,13 +296,6 @@ Keys should be under their respective sections (e.g., 'robocode', 'server').
 
 {Style.BRIGHT}tensorboard:{Style.RESET_ALL}
   bind_all:             Bind TensorBoard to all interfaces (true/false) (Required).
-
-{Style.BRIGHT}project_paths:{Style.RESET_ALL} (Optional - Defaults shown)
-  robot_src_dir:        Relative path to robot source (default: {plato_setup.constants.DEFAULT_ROBOT_SRC_REL}).
-  robot_bin_dir:        Relative path to robot compiled classes (default: {plato_setup.constants.DEFAULT_ROBOT_BIN_REL}).
-  robot_libs_dir:       Relative path to robot specific libraries (default: {plato_setup.constants.DEFAULT_ROBOT_LIBS_REL}).
-  project_libs_dir:     Relative path to shared project libraries (default: {plato_setup.constants.DEFAULT_PROJECT_LIBS_REL}).
-  server_dir:           Relative path to Python server code (default: {plato_setup.constants.DEFAULT_SERVER_DIR_REL}).
 
 Paths under 'project_paths' and relative 'log_dir' are resolved relative to the project root ({PROJECT_ROOT}).
 """)
@@ -365,22 +356,23 @@ def main():
     )
 
     print("--- Configuration Summary ---")
-    print(f" My Robot:           {cfg.get('robocode.my_robot_name')}")
-    print(f" Robocode Instances: {cfg.get('robocode.instances')}")
-    print(f" Robocode TPS:       {cfg.get('robocode.tps')}")
-    print(f" Robocode GUI:       {cfg.get('robocode.gui')}")
+    print(f" My Robot:           {cfg.get('robocode.my_robot_name', 'N/A')}")
+    print(f" Robocode Instances: {cfg.get('robocode.instances', 'N/A')}")
+    print(f" Robocode TPS:       {cfg.get('robocode.tps', 'N/A')}")
+    print(f" Robocode GUI:       {cfg.get('robocode.gui', 'N/A')}")
     print(f" Opponents:          {', '.join(cfg.get_opponents_list()) or 'None'}")
-    print(f" Battle Rounds:      {cfg.get('robocode.num_rounds')}")
+    print(f" Battle Rounds:      {cfg.get('robocode.num_rounds', 'N/A')}")
     print(
-        f" Battle Dimensions:  {cfg.get('robocode.battlefield_width')}x{cfg.get('robocode.battlefield_height')}"
+        f" Battle Dimensions:  {cfg.get('robocode.battlefield_width', 'N/A')}x{cfg.get('robocode.battlefield_height', 'N/A')}"
     )
-    print(f" Gun Cooling Rate:   {cfg.get('robocode.gun_cooling_rate')}")
-    print(f" Inactivity Time:    {cfg.get('robocode.inactivity_time')}")
+    print(f" Gun Cooling Rate:   {cfg.get('robocode.gun_cooling_rate', 'N/A')}")
+    print(f" Inactivity Time:    {cfg.get('robocode.inactivity_time', 'N/A')}")
     print(
-        f" Server Addr:        {cfg.get('server.ip')}:{cfg.get('server.weight_port')}(TCP)/{cfg.get('server.learn_port')}(UDP)"
+        f" Server Addr:        {cfg.get('server.ip', 'N/A')}:{cfg.get('server.weight_port', 'N/A')}(TCP)/{cfg.get('server.learn_port', 'N/A')}(UDP)"
     )
-    print(f" Python Log Level:   {cfg.get('logging.python_log_level')}")
-    print(f" Log Directory:      {cfg.get_path('log_dir')}")
+    print(f" Python Log Level:   {cfg.get('logging.python_log_level', 'N/A')}")
+    log_dir_path = cfg.get_path("log_dir")
+    print(f" Log Directory:      {log_dir_path if log_dir_path else 'N/A'}")
     print(f" Clean Logs:         {do_clean_logs}")
     print(f" Compile Robot:      {do_compile}")
     print(f" Tail Logs:          {do_tail_logs}")
@@ -421,12 +413,10 @@ def main():
     else:
         log_info("Skipping robot compilation (--no-compile).")
         if not check_robot_compiled(cfg):
-            log_error("Skipped compilation, but required robot class file is missing.")
-            log_error(f"Looked in: {cfg.get_path('robot_bin_dir')}")
-            log_error(f"Based on robot: {cfg.get('robocode.my_robot_name')}")
+            log_error("Skipped compilation, but required robot artifacts are missing.")
             sys.exit(1)
         else:
-            log_info("Pre-compiled robot class file found.")
+            log_info("Pre-compiled robot artifacts found.")
 
     if do_tail_logs:
         pm.enable_global_tailing()
@@ -448,9 +438,19 @@ def main():
         cleanup()
         sys.exit(1)
 
-    log_info(f"Starting {cfg.get('robocode.instances')} Robocode instance(s)...")
+    initial_server_wait_seconds = cfg.get("script_behavior.initial_server_wait", 10)
+    if initial_server_wait_seconds > 0:
+        log_info(
+            f"Waiting {initial_server_wait_seconds} seconds for server initial file setup..."
+        )
+        time.sleep(initial_server_wait_seconds)
+        log_info("Wait complete. Proceeding to start Robocode.")
+    else:
+        log_info("Initial server wait skipped (delay <= 0 in config or default).")
+
+    log_info(f"Starting {cfg.get('robocode.instances', 0)} Robocode instance(s)...")
     robocode_start_failures = 0
-    num_instances = cfg.get("robocode.instances")
+    num_instances = cfg.get("robocode.instances", 1)
     successful_starts = 0
     for i in range(1, num_instances + 1):
         if start_robocode_instance(i, cfg, pm):
@@ -461,7 +461,7 @@ def main():
 
     if robocode_start_failures > 0:
         log_warn(f"{robocode_start_failures} Robocode instance(s) failed to start.")
-        if successful_starts == 0:
+        if successful_starts == 0 and num_instances > 0:
             log_error("All Robocode instances failed to start.")
             cleanup()
             sys.exit(1)
@@ -482,12 +482,14 @@ def main():
             if server_proc and not server_proc.is_alive():
                 log_error("Python server process terminated unexpectedly. Stopping...")
                 break
-            robo_pids = [
+
+            robo_procs_alive = [
                 p
                 for name, p in pm.processes.items()
-                if "robocode_" in name and p.is_alive()
+                if name.startswith("robocode_") and p.is_alive()
             ]
-            if successful_starts > 0 and not robo_pids:
+
+            if successful_starts > 0 and not robo_procs_alive:
                 log_error("All Robocode instances terminated unexpectedly. Stopping...")
                 break
 
@@ -501,8 +503,8 @@ def main():
 
 
 if __name__ == "__main__":
-    signal.signal(signal.SIGINT, signal_handler)  # Ctrl+C
-    signal.signal(signal.SIGTERM, signal_handler)  # kill
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
 
     main()
     log_info(">>> Script finished. <<<")

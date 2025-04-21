@@ -1,12 +1,11 @@
-import h5py
-from http.server import BaseHTTPRequestHandler, HTTPServer
-import logging
-import os
-import socket
 import socketserver
+import socket
 import struct
 import threading
 import time
+import os
+import logging
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Dict, Any, Tuple
 
 import numpy as np
@@ -14,6 +13,7 @@ import torch
 import torch.multiprocessing as mp
 import torch.nn.functional as F
 import torch.optim as optim
+import torch.onnx
 
 from experience_memory import ExperienceMemory
 from network import QNetwork
@@ -24,26 +24,15 @@ weight_server_logger = logging.getLogger("WeightServ")
 
 socketserver.TCPServer.allow_reuse_address = True
 
-# --- Constants ---
-# Packet format specifiers (assuming float32 for state/reward)
-# >: Big-endian
-# i: client_id (int32) - Handled separately
-# f: float32
-# B: action (uint8)
-# ?: terminal (bool represented as byte 0 or 1)
 STATE_VAR_TYPE = "f"
 ACTION_TYPE = "B"
 REWARD_TYPE = "f"
 TERMINAL_TYPE = "?"
 CLIENT_ID_TYPE = ">i"
+MODEL_UPDATE_HEADER = "X-Model-Updates"
 
 
 class EnvironmentServer:
-    """
-    Listens for agent transitions via UDP, stores them in replay memory,
-    and performs DQN training updates. Logs metrics to TensorBoard.
-    """
-
     def __init__(
         self,
         state_dims: int,
@@ -52,6 +41,7 @@ class EnvironmentServer:
         ip: str,
         port: int,
         weights_filename: str,
+        updates_filename: str,
         lock: mp.Lock,
         learning_rate: float = 1e-2,
         gamma: float = 0.95,
@@ -59,39 +49,23 @@ class EnvironmentServer:
         replay_capacity: int = 10000,
         save_frequency: int = 1000,
         log_dir: str = "/tmp/plato_logs",
+        device: torch.device = torch.device("cpu"),
     ):
-        """
-        Initializes the EnvironmentServer.
-
-        Args:
-            state_dims: Number of dimensions in the state space.
-            action_dims: Number of possible actions.
-            hidden_dims: Size of the hidden layers in the QNetwork.
-            ip: IP address to bind the UDP server to.
-            port: Port to bind the UDP server to.
-            weights_filename: Path to the HDF5 file for model weights.
-            lock: A multiprocessing lock for safe HDF5 file access.
-            learning_rate: Learning rate for the Adam optimizer.
-            gamma: Discount factor for DQN updates.
-            batch_size: Batch size for sampling from replay memory.
-            replay_capacity: Maximum size of the experience replay memory.
-            save_frequency: Save weights every N updates. Set <= 0 to disable periodic saving.
-            log_dir: Directory for TensorBoard logs.
-        """
         self.state_dims = state_dims
         self.action_dims = action_dims
         self.ip = ip
         self.port = port
-        self.weights_filename = weights_filename
+        self.onnx_weights_filename = weights_filename
+        self.updates_filename = updates_filename
         self.lock = lock
         self.gamma = gamma
         self.batch_size = batch_size
         self.save_frequency = save_frequency
         self.log_dir = log_dir
+        self.device = device
+        self.shutdown_event = threading.Event()
 
-        # Generate packet format string based on state_dims
         state_struct = STATE_VAR_TYPE * self.state_dims
-        # Format: start_state (f*N), action (B), reward (f), end_state (f*N), terminal (?)
         self.packet_format = (
             ">"
             + state_struct
@@ -107,31 +81,32 @@ class EnvironmentServer:
         self.writer = TensorBoardWriter(self.log_dir)
         self.updates_counter = 0
 
-        # Build network and optimizer
-        self.network = QNetwork(state_dims, action_dims, hidden_dims)
+        self.network = QNetwork(state_dims, action_dims, hidden_dims).to(self.device)
         self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
-        # Create experience replay
         self.memory = ExperienceMemory(capacity=replay_capacity)
 
-        # --- Add Graph to TensorBoard ---
-        self._load_or_initialize_network()
+        self._initialize_network_state()
         self._add_graph_to_tensorboard()
 
         env_server_logger.info(
-            f"Initialized: state={state_dims}, action={action_dims}, hidden={hidden_dims}, "
+            f"Initialized on {self.device}: state={state_dims}, action={action_dims}, hidden={hidden_dims}, "
             f"bs={batch_size}, gamma={gamma:.2f}, lr={learning_rate:.1e}, "
             f"replay={replay_capacity}, save_freq={save_frequency}"
         )
+        env_server_logger.info(f"ONNX weights file: {self.onnx_weights_filename}")
+        env_server_logger.info(f"Updates file: {self.updates_filename}")
 
     def _add_graph_to_tensorboard(self):
         env_server_logger.debug("Attempting to add graph to TensorBoard...")
-        sample_input = torch.zeros(1, self.state_dims)
+        sample_input = torch.zeros(1, self.state_dims, device=self.device)
         try:
             if self.writer.writer is not None:
                 env_server_logger.debug(
                     f"Writer object available: {self.writer.writer}"
                 )
+                self.network.eval()
                 self.writer.writer.add_graph(self.network, sample_input)
+                self.network.train()
                 env_server_logger.info("Network graph added to TensorBoard.")
             else:
                 env_server_logger.warning(
@@ -140,99 +115,177 @@ class EnvironmentServer:
         except Exception as e:
             env_server_logger.error(f"FAILED add_graph: {e}", exc_info=True)
 
-    def _initialize_hdf5(self) -> None:
-        env_server_logger.info(
-            f"Initializing HDF5 structure in {self.weights_filename}"
-        )
+    def _initialize_network_state(self):
+        """Checks for existing state, loads if possible, or initializes fresh state."""
+        env_server_logger.debug("Acquiring lock for initial state setup...")
+        acquired = self.lock.acquire(timeout=20)
+        if not acquired:
+            env_server_logger.critical(
+                "Timeout acquiring lock for initial state setup. Cannot proceed."
+            )
+            raise TimeoutError("Could not acquire lock for initial state loading")
+
+        env_server_logger.debug("Lock acquired for initial state setup.")
+        needs_initial_save = False
         try:
-            os.makedirs(os.path.dirname(self.weights_filename), exist_ok=True)
-            with h5py.File(self.weights_filename, "w", driver="sec2") as f:
-                state_dict = self.network.state_dict()
-                for key, tensor in state_dict.items():
-                    f.create_dataset(key.replace(".", "/"), data=tensor.numpy())
-                f.attrs["updates"] = 0
-                f.attrs["state_dims"] = self.state_dims
-                f.attrs["action_dims"] = self.action_dims
-                f.attrs["hidden_dims"] = self.network.hidden_dims
-                f.flush()
-            self.updates_counter = 0
-            env_server_logger.info(f"Initialized HDF5 file '{self.weights_filename}'")
-        except Exception as e:
-            env_server_logger.error(
-                f"Failed to initialize HDF5 file {self.weights_filename}: {e}",
-                exc_info=True,
+            onnx_exists = os.path.exists(self.onnx_weights_filename)
+            updates_exists = os.path.exists(self.updates_filename)
+            pytorch_checkpoint_file = self.onnx_weights_filename.replace(".onnx", ".pt")
+            pytorch_exists = os.path.exists(pytorch_checkpoint_file)
+
+            if onnx_exists and updates_exists:
+                env_server_logger.info("Found existing ONNX and updates files.")
+                try:
+                    with open(self.updates_filename, "r") as f:
+                        loaded_updates = int(f.read().strip())
+
+                    if pytorch_exists:
+                        try:
+                            checkpoint = torch.load(
+                                pytorch_checkpoint_file, map_location=self.device
+                            )
+                            self.network.load_state_dict(checkpoint["model_state_dict"])
+                            self.optimizer.load_state_dict(
+                                checkpoint["optimizer_state_dict"]
+                            )
+                            if checkpoint.get("updates", -1) == loaded_updates:
+                                self.updates_counter = loaded_updates
+                                env_server_logger.info(
+                                    f"Successfully loaded PyTorch checkpoint and updates file. Resuming from {self.updates_counter} updates."
+                                )
+                            else:
+                                env_server_logger.warning(
+                                    f"Loaded PyTorch checkpoint, but update count mismatch ({checkpoint.get('updates', -1)} vs {loaded_updates} from file). Using file count."
+                                )
+                                self.updates_counter = loaded_updates
+                        except Exception as e_load_pt:
+                            env_server_logger.error(
+                                f"Failed to load PyTorch checkpoint {pytorch_checkpoint_file}, despite existing updates file. Will need initial save if network is used. Error: {e_load_pt}",
+                                exc_info=True,
+                            )
+                            self.updates_counter = loaded_updates
+                            env_server_logger.warning(
+                                "Re-initializing due to PyTorch checkpoint load failure."
+                            )
+                            needs_initial_save = True
+
+                    else:
+                        env_server_logger.warning(
+                            f"No corresponding PyTorch checkpoint found ({pytorch_checkpoint_file}). Using update count ({loaded_updates}) but network weights are initialized randomly."
+                        )
+                        self.updates_counter = loaded_updates
+                        needs_initial_save = True
+                        env_server_logger.warning(
+                            "Forcing initial save to sync random weights with ONNX/updates."
+                        )
+                        needs_initial_save = True
+
+                except Exception as e_load:
+                    env_server_logger.error(
+                        f"Error reading existing state file ({self.updates_filename}), initializing fresh: {e_load}",
+                        exc_info=True,
+                    )
+                    needs_initial_save = True
+            else:
+                env_server_logger.info(
+                    f"One or both state files missing (ONNX:{onnx_exists}, Updates:{updates_exists}). Initializing fresh state."
+                )
+                needs_initial_save = True
+
+            if needs_initial_save:
+                env_server_logger.info("Performing initial network state save...")
+                self.updates_counter = 0
+                self._save_network_internal()
+                env_server_logger.info(
+                    "Initial network state (0 updates) saved successfully."
+                )
+
+        except Exception as e_outer:
+            env_server_logger.critical(
+                f"Critical error during initial state setup: {e_outer}", exc_info=True
             )
             raise
+        finally:
+            env_server_logger.debug("Releasing lock after initial state setup.")
+            self.lock.release()
 
-    def _load_network(self) -> bool:
-        """Loads network state_dict and update count from HDF5 file."""
-        env_server_logger.info(
-            f"Attempting to restore weights from {self.weights_filename}..."
-        )
+    def _save_network_internal(self) -> None:
+        """Internal method containing the actual saving logic. Assumes lock is held."""
+        onnx_temp_filename = self.onnx_weights_filename + ".tmp"
+        updates_temp_filename = self.updates_filename + ".tmp"
+        pytorch_checkpoint_file = self.onnx_weights_filename.replace(".onnx", ".pt")
+        pytorch_temp_filename = pytorch_checkpoint_file + ".tmp"
+
         try:
-            with h5py.File(self.weights_filename, "r", driver="sec2") as f:
-                if "updates" not in f.attrs:
-                    env_server_logger.warning(
-                        "File exists but missing 'updates' attribute. Re-initializing."
-                    )
-                    return False
+            os.makedirs(os.path.dirname(self.onnx_weights_filename), exist_ok=True)
 
-                loaded_state_dims = f.attrs.get("state_dims")
-                loaded_action_dims = f.attrs.get("action_dims")
-                loaded_hidden_dims = f.attrs.get("hidden_dims")
+            self.network.to(self.device)
+            dummy_input = torch.randn(1, self.state_dims, device=self.device)
 
-                if (
-                    loaded_state_dims != self.state_dims
-                    or loaded_action_dims != self.action_dims
-                    or loaded_hidden_dims != self.network.hidden_dims
-                ):
-                    env_server_logger.warning(
-                        f"Network dimensions mismatch. Saved: (s={loaded_state_dims}, a={loaded_action_dims}, h={loaded_hidden_dims}), "
-                        f"Current: (s={self.state_dims}, a={self.action_dims}, h={self.network.hidden_dims}). Re-initializing."
-                    )
-                    return False
+            was_training = self.network.training
+            self.network.eval()
 
-                loaded_state_dict = {}
-                required_keys = set(self.network.state_dict().keys())
-                loaded_keys = set()
+            torch.onnx.export(
+                self.network,
+                dummy_input,
+                onnx_temp_filename,
+                export_params=True,
+                opset_version=11,
+                do_constant_folding=True,
+                input_names=["input"],
+                output_names=["output"],
+                dynamic_axes={
+                    "input": {0: "batch_size"},
+                    "output": {0: "batch_size"},
+                },
+            )
 
-                def visitor_func(name, obj):
-                    if isinstance(obj, h5py.Dataset):
-                        key = name.replace("/", ".")
-                        if key in required_keys:
-                            loaded_state_dict[key] = torch.from_numpy(obj[:])
-                            loaded_keys.add(key)
+            if was_training:
+                self.network.train()
 
-                f.visititems(visitor_func)
+            with open(updates_temp_filename, "w") as f:
+                f.write(str(self.updates_counter))
 
-                if loaded_keys != required_keys:
-                    missing_keys = required_keys - loaded_keys
-                    extra_keys = loaded_keys - required_keys
-                    env_server_logger.error(
-                        f"Key mismatch loading weights. Missing: {missing_keys}. Extra: {extra_keys}. Re-initializing."
-                    )
-                    return False
+            torch.save(
+                {
+                    "updates": self.updates_counter,
+                    "model_state_dict": self.network.state_dict(),
+                    "optimizer_state_dict": self.optimizer.state_dict(),
+                },
+                pytorch_temp_filename,
+            )
 
-                self.network.load_state_dict(loaded_state_dict)
-                self.updates_counter = f.attrs["updates"]
-                env_server_logger.info(
-                    f"Restored network with {self.updates_counter} updates from {self.weights_filename}"
-                )
-                return True
-        except FileNotFoundError:
-            env_server_logger.info(f"Weights file {self.weights_filename} not found.")
-            return False
+            os.replace(onnx_temp_filename, self.onnx_weights_filename)
+            os.replace(updates_temp_filename, self.updates_filename)
+            os.replace(pytorch_temp_filename, pytorch_checkpoint_file)
+
+            env_server_logger.info(
+                f"Saved state ({self.updates_counter} updates): ONNX, Updates file, PyTorch checkpoint."
+            )
+
         except Exception as e:
             env_server_logger.error(
-                f"Failed to load weights from {self.weights_filename}: {e}. Re-initializing.",
-                exc_info=True,
+                f"Failed during internal save operation: {e}", exc_info=True
             )
-            return False
+            for temp_file in [
+                onnx_temp_filename,
+                updates_temp_filename,
+                pytorch_temp_filename,
+            ]:
+                if os.path.exists(temp_file):
+                    try:
+                        os.remove(temp_file)
+                        env_server_logger.debug(f"Removed temporary file: {temp_file}")
+                    except OSError as e_rem:
+                        env_server_logger.warning(
+                            f"Could not remove temp file {temp_file}: {e_rem}"
+                        )
+            raise
 
     def _save_network(self) -> None:
-        """Saves the current network state_dict and update count to HDF5."""
+        """Public method to save the network state, acquiring the lock."""
         env_server_logger.debug(
-            f"Acquiring lock to save weights to {self.weights_filename}"
+            f"Acquiring lock to save network state (Update #{self.updates_counter})"
         )
         acquired = self.lock.acquire(timeout=10)
         if not acquired:
@@ -240,79 +293,29 @@ class EnvironmentServer:
                 "Timeout acquiring lock to save weights. Skipping save."
             )
             return
-        env_server_logger.debug(f"Lock acquired for saving.")
+        env_server_logger.debug("Lock acquired for saving.")
         try:
-            os.makedirs(os.path.dirname(self.weights_filename), exist_ok=True)
-            temp_filename = self.weights_filename + ".tmp"
-            with h5py.File(temp_filename, "w", driver="sec2") as f:
-                state_dict = self.network.state_dict()
-                for key, tensor in state_dict.items():
-                    f.create_dataset(key.replace(".", "/"), data=tensor.cpu().numpy())
-                f.attrs["updates"] = self.updates_counter
-                f.attrs["state_dims"] = self.state_dims
-                f.attrs["action_dims"] = self.action_dims
-                f.attrs["hidden_dims"] = self.network.hidden_dims
-                f.flush()
-            os.replace(temp_filename, self.weights_filename)
-            env_server_logger.info(
-                f"Saved network ({self.updates_counter} updates) to {self.weights_filename}"
-            )
-        except Exception as e:
-            env_server_logger.error(
-                f"Failed to save weights to {self.weights_filename}: {e}", exc_info=True
-            )
-            if os.path.exists(temp_filename):
-                try:
-                    os.remove(temp_filename)
-                except OSError:
-                    pass
+            self._save_network_internal()
+        except Exception:
+            env_server_logger.error("Save network failed (see previous error).")
         finally:
-            env_server_logger.debug(f"Releasing lock for saving.")
-            self.lock.release()
-
-    def _load_or_initialize_network(self) -> None:
-        """Loads network if exists and valid, otherwise initializes."""
-        env_server_logger.debug(
-            f"Acquiring lock for initial load/init of {self.weights_filename}"
-        )
-        acquired = self.lock.acquire(timeout=10)
-        if not acquired:
-            env_server_logger.critical(
-                "Timeout acquiring lock for initial weight load/init. Cannot proceed."
-            )
-            raise TimeoutError("Could not acquire lock for initial weight loading")
-        env_server_logger.debug(f"Lock acquired for initial load/init.")
-        try:
-            if os.path.exists(self.weights_filename):
-                if not self._load_network():
-                    backup_path = (
-                        self.weights_filename
-                        + ".backup_"
-                        + time.strftime("%Y%m%d_%H%M%S")
-                    )
-                    try:
-                        os.rename(self.weights_filename, backup_path)
-                        env_server_logger.info(
-                            f"Backed up invalid weights file to {backup_path}"
-                        )
-                    except OSError as e:
-                        env_server_logger.error(
-                            f"Could not back up invalid weights file {self.weights_filename}: {e}"
-                        )
-                    self._initialize_hdf5()
-            else:
-                self._initialize_hdf5()
-        finally:
-            env_server_logger.debug(f"Releasing lock for initial load/init.")
+            env_server_logger.debug("Releasing lock after saving attempt.")
             self.lock.release()
 
     def start(self) -> None:
-        """Starts the server's main loop in a separate thread."""
         env_server_logger.info("Starting EnvironmentServer background threads.")
         self.writer.start_listening()
         thread_name = threading.current_thread().name + "-UDPListener"
         thread = threading.Thread(target=self._run, name=thread_name, daemon=True)
         thread.start()
+
+    def shutdown(self):
+        env_server_logger.info("EnvironmentServer shutdown requested.")
+        self.shutdown_event.set()
+        self.writer.stop()
+        env_server_logger.info("EnvironmentServer writer stopped.")
+        env_server_logger.info("Performing final network save...")
+        self._save_network()
 
     def _run(self) -> None:
         """Main server loop: listens for UDP packets and processes them."""
@@ -320,6 +323,7 @@ class EnvironmentServer:
             sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             sock.bind((self.ip, self.port))
+            sock.settimeout(1.0)
             env_server_logger.info(
                 f"Listening for client packets on UDP {self.ip}:{self.port}"
             )
@@ -330,7 +334,7 @@ class EnvironmentServer:
             )
             return
 
-        while True:
+        while not self.shutdown_event.is_set():
             try:
                 buf, addr = sock.recvfrom(self.packet_size + self.client_id_size + 256)
 
@@ -354,6 +358,8 @@ class EnvironmentServer:
 
                 self._handle_transition(client_id, unpacked_data)
 
+            except socket.timeout:
+                continue
             except struct.error as e:
                 env_server_logger.warning(
                     f"Failed to unpack packet from {addr}: {e}. Packet length: {len(buf) if 'buf' in locals() else 'N/A'}. Expected format: '{self.packet_format}' (size {self.packet_size})"
@@ -363,6 +369,11 @@ class EnvironmentServer:
                     f"Connection reset error for address {addr}. Client likely disconnected."
                 )
             except OSError as e:
+                if self.shutdown_event.is_set() and e.errno == 9:  # Bad file descriptor
+                    env_server_logger.info(
+                        "Socket closed during shutdown, exiting listener loop."
+                    )
+                    break
                 env_server_logger.error(
                     f"Socket error in receive loop: {e}", exc_info=True
                 )
@@ -373,11 +384,15 @@ class EnvironmentServer:
                 )
                 time.sleep(1)
 
+        sock.close()
+        env_server_logger.info("EnvironmentServer UDP listener thread finished.")
+
     def _handle_transition(self, client_id: int, packet: Tuple) -> None:
-        """Processes a single unpacked transition."""
         env_server_logger.debug(f"Received transition from client {client_id}")
         try:
-            transition_tensor = torch.tensor(packet, dtype=torch.float32).unsqueeze(0)
+            transition_tensor = torch.tensor(
+                packet, dtype=torch.float32, device=self.device
+            ).unsqueeze(0)
         except Exception as e:
             env_server_logger.error(
                 f"Could not convert packet to tensor: {packet}, Error: {e}"
@@ -399,15 +414,19 @@ class EnvironmentServer:
         reward = packet[reward_idx]
         terminal = bool(packet[terminal_idx])
         end_state = torch.tensor(
-            packet[end_state_start_idx:end_state_end_idx], dtype=torch.float32
+            packet[end_state_start_idx:end_state_end_idx],
+            dtype=torch.float32,
+            device=self.device,
         )
 
         self.episodes[client_id]["reward"] += reward
         self.episodes[client_id]["length"] += 1
 
+        self.network.eval()
         with torch.no_grad():
             q_values_next = self.network(end_state.unsqueeze(0)).squeeze(0)
             self.episodes[client_id]["q_values"].append(q_values_next.mean().item())
+        self.network.train()
 
         if terminal:
             env_server_logger.info(f"Terminal flag received for client {client_id}.")
@@ -449,9 +468,10 @@ class EnvironmentServer:
         if len(self.memory) >= self.batch_size:
             self.perform_update()
         elif len(self.memory) < self.batch_size and self.updates_counter == 0:
-            env_server_logger.info(
-                f"Memory size {len(self.memory)}/{self.batch_size}. Waiting for samples."
-            )
+            if len(self.memory) % 10 == 0 or len(self.memory) == 1:
+                env_server_logger.info(
+                    f"Memory size {len(self.memory)}/{self.batch_size}. Waiting for samples..."
+                )
 
     def perform_update(self) -> None:
         if len(self.memory) < self.batch_size:
@@ -461,7 +481,7 @@ class EnvironmentServer:
             return
 
         try:
-            sample = self.memory.get_batch(self.batch_size)
+            sample = self.memory.get_batch(self.batch_size).to(self.device)
         except ValueError as e:
             env_server_logger.warning(f"Skipping update: {e}")
             return
@@ -477,7 +497,9 @@ class EnvironmentServer:
         end_state_end_idx = end_state_start_idx + self.state_dims
         terminal_idx = end_state_end_idx
 
-        expected_cols = 2 * self.state_dims + 3
+        expected_cols = (
+            (2 * self.state_dims) + 1 + 1 + 1
+        )  # state + action + reward + next_state + terminal
         if sample.shape[1] != expected_cols:
             env_server_logger.error(
                 f"Sample batch has incorrect columns. Expected {expected_cols}, got {sample.shape[1]}. "
@@ -491,11 +513,16 @@ class EnvironmentServer:
         end_states = sample[:, end_state_start_idx:end_state_end_idx]
         terminals = sample[:, terminal_idx].bool()
 
+        self.network.train()
+
         q_values_current = self.network(start_states)
         q_values_for_actions_taken = q_values_current.gather(1, actions).squeeze(1)
 
         with torch.no_grad():
+            self.network.eval()
             q_values_next = self.network(end_states)
+            self.network.train()
+
             max_q_values_next = q_values_next.max(dim=1)[0]
             max_q_values_next[terminals] = 0.0
             target_q_values = rewards + self.gamma * max_q_values_next
@@ -505,26 +532,8 @@ class EnvironmentServer:
         self.optimizer.zero_grad()
         loss.backward()
 
-        log_histograms_freq = 50
-        if (
-            self.writer.writer is not None
-            and (self.updates_counter + 1) % log_histograms_freq == 0
-        ):
-            for name, param in self.network.named_parameters():
-                if param.grad is not None:
-                    tb_tag = f"Gradients/{name.replace('.', '/')}"
-                    try:
-                        self.writer.writer.add_histogram(
-                            tb_tag,
-                            param.grad.cpu(),
-                            global_step=(self.updates_counter + 1),
-                        )
-                    except ValueError as ve:
-                        env_server_logger.warning(
-                            f"Skipping histogram log for {tb_tag} due to error: {ve}"
-                        )
-
         torch.nn.utils.clip_grad_norm_(self.network.parameters(), max_norm=1.0)
+
         self.optimizer.step()
 
         self.updates_counter += 1
@@ -540,45 +549,37 @@ class EnvironmentServer:
             update_step=current_update_step,
         )
 
+        log_histograms_freq = 50
         if (
             self.writer.writer is not None
             and current_update_step % log_histograms_freq == 0
         ):
             for name, param in self.network.named_parameters():
-                if param.data is not None:
-                    tb_tag = f"Parameters/{name.replace('.', '/')}"
+                if param.grad is not None:
+                    tb_tag = f"Gradients/{name.replace('.', '/')}"
                     try:
                         self.writer.writer.add_histogram(
-                            tb_tag, param.data.cpu(), global_step=current_update_step
+                            tb_tag,
+                            param.grad.cpu(),
+                            global_step=current_update_step,
                         )
                     except ValueError as ve:
                         env_server_logger.warning(
                             f"Skipping histogram log for {tb_tag} due to error: {ve}"
                         )
-
-            with torch.no_grad():
-                try:  # Add try/except for activation logging
-                    x1 = F.relu(self.network.fc1(start_states))
-                    self.writer.writer.add_histogram(
-                        "Activations/fc1_relu",
-                        x1.cpu(),
-                        global_step=current_update_step,
-                    )
-                    x2 = F.relu(self.network.fc2(x1))
-                    self.writer.writer.add_histogram(
-                        "Activations/fc2_relu",
-                        x2.cpu(),
-                        global_step=current_update_step,
-                    )
-                    out = self.network.out(x2)
-                    self.writer.writer.add_histogram(
-                        "Activations/out", out.cpu(), global_step=current_update_step
-                    )
-                except Exception as act_e:
-                    env_server_logger.error(
-                        f"Error logging activations: {act_e}", exc_info=True
-                    )
-
+            for name, param in self.network.named_parameters():
+                if param.data is not None:
+                    tb_tag = f"Parameters/{name.replace('.', '/')}"
+                    try:
+                        self.writer.writer.add_histogram(
+                            tb_tag,
+                            param.data.cpu(),
+                            global_step=current_update_step,
+                        )
+                    except ValueError as ve:
+                        env_server_logger.warning(
+                            f"Skipping histogram log for {tb_tag} due to error: {ve}"
+                        )
             self.writer.writer.flush()
 
         env_server_logger.debug(
@@ -590,21 +591,20 @@ class EnvironmentServer:
 
 
 class WeightServer:
-    """
-    Serves the latest network weights file via HTTP GET requests.
-    Uses a multiprocessing lock for safe file access shared with EnvironmentServer.
-    """
     class _WeightHandler(BaseHTTPRequestHandler):
-        """Handles incoming GET requests to serve the weights file."""
-        server_filename: str = ""
+        server_onnx_filename: str = ""
+        server_updates_filename: str = ""
         server_lock: mp.Lock = None
 
         def do_GET(self) -> None:
-            """Serves the weights file if it exists."""
-            if not self.server_lock or not self.server_filename:
+            if (
+                not self.server_lock
+                or not self.server_onnx_filename
+                or not self.server_updates_filename
+            ):
                 self.send_error(500, "Server not configured properly")
                 weight_server_logger.error(
-                    "WeightHandler accessed without filename or lock configured."
+                    "WeightHandler accessed without filenames or lock configured."
                 )
                 return
 
@@ -612,27 +612,42 @@ class WeightServer:
                 f"Weight request received from {self.client_address}"
             )
             weight_server_logger.debug(
-                f"Acquiring lock for {self.server_filename} in WeightHandler"
+                f"Acquiring lock for {self.server_onnx_filename} in WeightHandler"
             )
             acquired = self.server_lock.acquire(timeout=5)
             if not acquired:
                 weight_server_logger.error(
-                    f"Timeout acquiring lock for {self.server_filename} in WeightHandler"
+                    f"Timeout acquiring lock for {self.server_onnx_filename} in WeightHandler"
                 )
                 self.send_error(503, "Service Unavailable (Lock timeout)")
                 return
             weight_server_logger.debug(
-                f"Lock acquired for {self.server_filename} in WeightHandler"
+                f"Lock acquired for {self.server_onnx_filename} in WeightHandler"
             )
 
             try:
-                if os.path.exists(self.server_filename):
+                onnx_exists = os.path.exists(self.server_onnx_filename)
+                updates_exists = os.path.exists(self.server_updates_filename)
+
+                if onnx_exists and updates_exists:
                     try:
-                        with open(self.server_filename, "rb") as f:
+                        updates_count = "-1"
+                        try:
+                            with open(self.server_updates_filename, "r") as uf:
+                                updates_count = uf.read().strip()
+                        except Exception as e_read_update:
+                            weight_server_logger.error(
+                                f"Failed to read updates file {self.server_updates_filename}: {e_read_update}"
+                            )
+                            self.send_error(500, "Error reading server state")
+                            return
+
+                        with open(self.server_onnx_filename, "rb") as f:
                             fs = os.fstat(f.fileno())
                             self.send_response(200)
                             self.send_header("Content-Type", "application/octet-stream")
                             self.send_header("Content-Length", str(fs.st_size))
+                            self.send_header(MODEL_UPDATE_HEADER, updates_count)
                             self.send_header(
                                 "Cache-Control", "no-cache, no-store, must-revalidate"
                             )
@@ -641,28 +656,30 @@ class WeightServer:
                             self.end_headers()
                             self.wfile.write(f.read())
                         weight_server_logger.debug(
-                            f"Sent weights file {self.server_filename} to {self.client_address}"
+                            f"Sent weights file {self.server_onnx_filename} (Updates: {updates_count}) to {self.client_address}"
                         )
                     except FileNotFoundError:
                         self.send_error(404, "Weights file disappeared")
                         weight_server_logger.error(
-                            f"Weights file {self.server_filename} not found during read (race condition?)"
+                            f"Weights file {self.server_onnx_filename} or {self.server_updates_filename} not found during read (race condition?)"
                         )
                     except Exception as e:
                         self.send_error(500, f"Error reading weights file: {e}")
                         weight_server_logger.error(
-                            f"Error serving weights file {self.server_filename}: {e}",
+                            f"Error serving weights file {self.server_onnx_filename}: {e}",
                             exc_info=True,
                         )
                 else:
-                    self.send_error(404, "Weights file not found")
+                    self.send_error(404, "Weights file or updates file not found")
                     weight_server_logger.warning(
-                        f"Weights file {self.server_filename} not found for request from {self.client_address}"
+                        f"Weights file {self.server_onnx_filename} (exists: {onnx_exists}) or "
+                        f"{self.server_updates_filename} (exists: {updates_exists}) "
+                        f"not found for request from {self.client_address} (checked after lock)."
                     )
 
             finally:
                 weight_server_logger.debug(
-                    f"Releasing lock for {self.server_filename} in WeightHandler"
+                    f"Releasing lock for {self.server_onnx_filename} in WeightHandler"
                 )
                 self.server_lock.release()
 
@@ -675,37 +692,45 @@ class WeightServer:
         def log_error(self, format: str, *args) -> None:
             weight_server_logger.error(f"HTTP Server Error: {format % args}")
 
-    def __init__(self, ip: str, port: int, filename: str, lock: mp.Lock):
-        """
-        Initializes the WeightServer.
-
-        Args:
-            ip: IP address to bind the HTTP server to.
-            port: Port to bind the HTTP server to.
-            filename: Path to the HDF5 weights file to serve.
-            lock: A multiprocessing lock for safe file access (shared with EnvironmentServer).
-        """
+    def __init__(
+        self,
+        ip: str,
+        port: int,
+        onnx_filename: str,
+        updates_filename: str,
+        lock: mp.Lock,
+    ):
         self.ip = ip
         self.port = port
-        self.filename = filename
+        self.onnx_filename = onnx_filename
+        self.updates_filename = updates_filename
         self.lock = lock
         self.httpd = None
+        self.shutdown_event = threading.Event()
 
     def _create_handler_class(self) -> type:
-        """Factory function to create a handler class with necessary context."""
-
         class CustomHandler(self._WeightHandler):
-            server_filename = self.filename
+            server_onnx_filename = self.onnx_filename
+            server_updates_filename = self.updates_filename
             server_lock = self.lock
 
         return CustomHandler
 
     def start(self) -> None:
-        """Starts the HTTP server in a separate thread."""
         weight_server_logger.info("Starting WeightServer thread.")
         thread_name = threading.current_thread().name + "-HTTPListener"
         thread = threading.Thread(target=self._run, name=thread_name, daemon=True)
         thread.start()
+
+    def shutdown(self):
+        weight_server_logger.info("WeightServer shutdown requested.")
+        self.shutdown_event.set()
+        if self.httpd:
+            try:
+                self.httpd.shutdown()
+                weight_server_logger.info("WeightServer httpd shutdown called.")
+            except Exception as e:
+                weight_server_logger.error(f"Error calling httpd.shutdown(): {e}")
 
     def _run(self) -> None:
         """Runs the HTTP server loop."""
@@ -715,20 +740,24 @@ class WeightServer:
             weight_server_logger.info(
                 f"Listening for weight requests on http://{self.ip}:{self.port}"
             )
-            self.httpd.serve_forever()
+            self.httpd.serve_forever(poll_interval=0.5)
+
         except OSError as e:
-            weight_server_logger.error(
-                f"Failed to start WeightServer on {self.ip}:{self.port}: {e}",
-                exc_info=True,
-            )
+            if not self.shutdown_event.is_set():
+                weight_server_logger.error(
+                    f"Failed to start WeightServer on {self.ip}:{self.port}: {e}",
+                    exc_info=True,
+                )
         except Exception as e:
-            weight_server_logger.error(
-                f"Unexpected error in WeightServer: {e}", exc_info=True
-            )
+            if not self.shutdown_event.is_set():
+                weight_server_logger.error(
+                    f"Unexpected error in WeightServer run loop: {e}", exc_info=True
+                )
         finally:
             weight_server_logger.info("WeightServer run loop finished.")
             if self.httpd:
                 try:
                     self.httpd.server_close()
+                    weight_server_logger.info("WeightServer httpd socket closed.")
                 except Exception as e_close:
                     weight_server_logger.error(f"Error closing httpd socket: {e_close}")

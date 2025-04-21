@@ -30,3 +30,6 @@ tensorboard:
 project_paths:
   server_dir: "plato-server"
   maven_project_dir: "plato-robot"
+
+script_behavior:
+  initial_server_wait: 10
