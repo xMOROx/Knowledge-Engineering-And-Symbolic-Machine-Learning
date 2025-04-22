@@ -25,6 +25,7 @@ public class PlatoRobot extends AdvancedRobot {
   private RobotConfig config;
   private String weightServerUrl;
   private String modelFileName = "network_weights.onnx";
+  private volatile boolean isRoundOver = false;
 
   StateReporter stateReporter;
   Network network;
@@ -109,7 +110,7 @@ public class PlatoRobot extends AdvancedRobot {
       setAdjustGunForRobotTurn(true);
       setAdjustRadarForGunTurn(true);
 
-      while (true) {
+      while (!isRoundOver) {
         setTurnRadarRight(360);
         if (getTime() > 0 && getTime() % config.timing.actionInterval == 0) {
           performAction();
@@ -117,10 +118,15 @@ public class PlatoRobot extends AdvancedRobot {
         if (getTime() > 0 && getTime() % config.timing.networkReloadInterval == 0) {
           reloadNetwork();
         }
-        execute();
+        if (!isRoundOver) {
+          execute();
+        } else {
+          logger.info("Round ended, skipping final execute()");
+        }
       }
     } catch (Throwable t) {
       logger.error("FATAL ERROR in run() or main loop:", t);
+    } finally {
       cleanup();
     }
   }
@@ -193,7 +199,7 @@ public class PlatoRobot extends AdvancedRobot {
     }
 
     if (this.previousState != null && this.stateReporter != null) {
-      logger.debug("Recording non-terminal transition @ {} for Action: {}, Reward: {:.3f}",
+      logger.debug("Recording non-terminal transition @ {} for Action: {}, Reward: {}",
           getTime(), this.lastActionChosen, this.rewardReceived);
       this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(),
           (float) this.rewardReceived, this.currentState, false);
@@ -235,7 +241,7 @@ public class PlatoRobot extends AdvancedRobot {
         }
       }
       actionToTake = Action.fromInteger(bestActionIndex);
-      logger.debug("Action @ {} (Greedy): {} (MaxQ: {:.4f})", getTime(), actionToTake, maxQ);
+      logger.debug("Action @ {} (Greedy): {} (MaxQ: {})", getTime(), actionToTake, maxQ);
     }
 
     logger.debug("Queuing action: {} @ {}", actionToTake, getTime());
@@ -289,7 +295,7 @@ public class PlatoRobot extends AdvancedRobot {
         double actualEnergyChange = opponentEnergyChangeScaled * 10.0;
         double hitReward = actualEnergyChange * config.rewards.hitMultiplier;
         reward += hitReward;
-        logger.debug("Reward Calc @ {}: Opponent Hit! ScaledDelta={:.3f}, Reward+={:.3f}", getTime(),
+        logger.debug("Reward Calc @ {}: Opponent Hit! ScaledDelta={}, Reward+={}", getTime(),
             opponentEnergyChangeScaled, hitReward);
       }
 
@@ -298,7 +304,7 @@ public class PlatoRobot extends AdvancedRobot {
         double actualEnergyLost = -selfEnergyChangeScaled * 10.0;
         double hitPenalty = -actualEnergyLost * config.rewards.penaltyGotHitMultiplier;
         reward += hitPenalty;
-        logger.debug("Reward Calc @ {}: Got Hit! ScaledDelta={:.3f}, Reward+={:.3f}", getTime(),
+        logger.debug("Reward Calc @ {}: Got Hit! ScaledDelta={}, Reward+={}", getTime(),
             selfEnergyChangeScaled, hitPenalty);
       }
     }
@@ -309,7 +315,7 @@ public class PlatoRobot extends AdvancedRobot {
     }
 
     this.rewardReceived += reward;
-    logger.debug("Scan processed @ {}. Updated currentState. Cycle reward = {:.3f}. Total pending reward = {:.3f}",
+    logger.debug("Scan processed @ {}. Updated currentState. Cycle reward = {}. Total pending reward = {}",
         getTime(), reward, this.rewardReceived);
 
     double absoluteBearingRadians = getHeadingRadians() + event.getBearingRadians();
@@ -321,7 +327,7 @@ public class PlatoRobot extends AdvancedRobot {
   public void onHitWall(HitWallEvent event) {
     logger.debug("--- ONHITWALL EVENT at time {} ---", getTime());
     this.rewardReceived -= config.rewards.penaltyHitWall;
-    logger.debug("Hit wall penalty applied (-{:.3f}). Current rewardReceived = {:.3f}",
+    logger.debug("Hit wall penalty applied (-{}). Current rewardReceived = {}",
         config.rewards.penaltyHitWall, this.rewardReceived);
   }
 
@@ -350,7 +356,7 @@ public class PlatoRobot extends AdvancedRobot {
     if (this.stateReporter != null && this.previousState != null) {
       float finalReward = (float) (this.rewardReceived - config.rewards.penaltyDeath);
       logger.info(
-          "Recording final transition (DEATH) for action {}. BaseReward={:.3f}, DeathPenalty={:.3f}, FinalReward={:.3f}",
+          "Recording final transition (DEATH) for action {}. BaseReward={}, DeathPenalty={}, FinalReward={}",
           this.lastActionChosen, this.rewardReceived, config.rewards.penaltyDeath, finalReward);
       this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(), finalReward, finalState,
           true);
@@ -362,7 +368,7 @@ public class PlatoRobot extends AdvancedRobot {
     if (this.stateReporter != null) {
       this.stateReporter.close();
     }
-    cleanup();
+    this.isRoundOver = true;
   }
 
   @Override
@@ -390,7 +396,7 @@ public class PlatoRobot extends AdvancedRobot {
     if (this.stateReporter != null && this.previousState != null) {
       float finalReward = (float) (this.rewardReceived + config.rewards.win);
       logger.info(
-          "Recording final transition (WIN) for action {}. BaseReward={:.3f}, WinReward={:.3f}, FinalReward={:.3f}",
+          "Recording final transition (WIN) for action {}. BaseReward={}, WinReward={}, FinalReward={}",
           this.lastActionChosen, this.rewardReceived, config.rewards.win, finalReward);
       this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(), finalReward, finalState,
           true);
@@ -402,7 +408,7 @@ public class PlatoRobot extends AdvancedRobot {
     if (this.stateReporter != null) {
       this.stateReporter.close();
     }
-    cleanup();
+    this.isRoundOver = true;
   }
 
   private void cleanup() {
@@ -426,7 +432,7 @@ public class PlatoRobot extends AdvancedRobot {
     this.currentState = null;
     this.network = null;
     this.stateReporter = null;
-    this.config = null;
+    // this.config = null;
 
     logger.info("Cleanup finished.");
   }
