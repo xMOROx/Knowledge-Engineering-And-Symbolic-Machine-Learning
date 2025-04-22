@@ -1,6 +1,7 @@
 import logging
 import os
 import subprocess
+import shlex
 from pathlib import Path
 from typing import Optional, List
 
@@ -14,13 +15,19 @@ from .constants import (
     SERVER_WAIT_INTERVAL_S,
     SERVER_WAIT_TIMEOUT_S,
     TBOARD_PREFIX,
+    TMUX_COMMAND,
+    DEFAULT_TMUX_SESSION_NAME,
+    DEFAULT_SLF4J_SHOW_DATETIME,
+    DEFAULT_SLF4J_DATETIME_FORMAT,
+    DEFAULT_SLF4J_SHOW_THREAD_NAME,
+    DEFAULT_SLF4J_SHOW_LOG_NAME,
+    DEFAULT_SLF4J_SHOW_SHORT_LOG_NAME,
+    DEFAULT_SLF4J_LEVEL_IN_BRACKETS,
+    DEFAULT_SLF4J_WARN_LEVEL_STRING,
 )
 from .logger import log_with_prefix
 from .process_manager import ProcessManager
-from .utils import (
-    expand_classpath_wildcards,
-    wait_for_ports,
-)
+from .utils import expand_classpath_wildcards, wait_for_ports, check_robot_class_file
 
 log = logging.getLogger(__name__)
 
@@ -28,7 +35,6 @@ log = logging.getLogger(__name__)
 def generate_battle_file(
     cfg: Config, base_battle_file_path: Optional[Path] = None
 ) -> bool:
-    """Generates a .battle file using config values, optionally based on a template."""
     output_path = cfg.get_path("generated_battle_file")
     if not output_path:
         log.error("Internal error: Generated battle file path not set in config.")
@@ -84,6 +90,9 @@ def generate_battle_file(
                         if key in battle_props:
                             final_lines.append(f"{key}={battle_props[key]}")
                             existing_keys.add(key)
+                            log.debug(
+                                f"Overriding base battle key '{key}' with value: {battle_props[key]}"
+                            )
                         else:
                             final_lines.append(line)
                             existing_keys.add(key)
@@ -104,6 +113,7 @@ def generate_battle_file(
     for key, value in battle_props.items():
         if key not in existing_keys:
             final_lines.append(f"{key}={value}")
+            log.debug(f"Adding generated battle key '{key}' with value: {value}")
 
     try:
         output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -118,7 +128,6 @@ def generate_battle_file(
 
 
 def compile_robot(cfg: Config) -> bool:
-    """Compiles the Java robot using Maven."""
     log.info("Compiling Robocode robot using Maven...")
     maven_project_dir = cfg.get_path("maven_project_dir")
     if not maven_project_dir or not maven_project_dir.is_dir():
@@ -136,6 +145,10 @@ def compile_robot(cfg: Config) -> bool:
         log.error(f"Robocode home path not configured or invalid: {robocode_home_path}")
         return False
 
+    maven_log_level_str = cfg.get("logging.maven_capture_level", "INFO")
+    maven_numeric_level = logging.getLevelName(maven_log_level_str.upper())
+    log.info(f"Capturing Maven output at script level: {maven_log_level_str}")
+
     mvn_cmd = [
         "mvn",
         "clean",
@@ -145,11 +158,11 @@ def compile_robot(cfg: Config) -> bool:
         str(pom_file.resolve()),
     ]
 
-    log.debug(f"Maven Compile Command: {' '.join(mvn_cmd)}")
+    log.debug(f"Maven Compile Command: {shlex.join(mvn_cmd)}")
     log.debug(f"Maven Working Directory: {maven_project_dir}")
 
     try:
-        log.info("Running Maven build...")
+        log.info("Running Maven build (output will be logged below)...")
         process = subprocess.Popen(
             mvn_cmd,
             stdout=subprocess.PIPE,
@@ -162,7 +175,8 @@ def compile_robot(cfg: Config) -> bool:
 
         if process.stdout:
             for line in iter(process.stdout.readline, ""):
-                log_with_prefix(logging.INFO, MAVEN_PREFIX, line.strip())
+                if line.strip():
+                    log_with_prefix(maven_numeric_level, MAVEN_PREFIX, line.strip())
             process.stdout.close()
 
         return_code = process.wait()
@@ -173,36 +187,7 @@ def compile_robot(cfg: Config) -> bool:
             return False
         else:
             log.info("Maven build successful.")
-
-            artifact_id = cfg.get("maven.artifact_id", "plato-robot")
-            version = cfg.get("maven.version", "1.0-SNAPSHOT")
-            target_dir = maven_project_dir / "target"
-            expected_jar_file = target_dir / f"{artifact_id}-{version}.jar"
-            dep_dir = target_dir / "lib"
-
-            if not expected_jar_file.is_file():
-                log.error(
-                    f"Expected robot JAR file not found after build: {expected_jar_file}"
-                )
-                log.error(
-                    "Check pom.xml <artifactId> and <version> match expectations."
-                )
-                return False
-            log.info(
-                f"Verified robot JAR exists: {expected_jar_file.relative_to(cfg.project_root)}"
-            )
-
-            if not dep_dir.is_dir():
-                log.warning(
-                    f"Maven dependency directory not found: {dep_dir}. Dependencies might be missing."
-                )
-                return False
-            elif not any(dep_dir.glob("*.jar")):
-                log.warning(
-                    f"Maven dependency directory {dep_dir} exists but contains no JAR files."
-                )
-
-            return True
+            return check_robot_compiled(cfg)
 
     except FileNotFoundError:
         log.error(
@@ -215,7 +200,7 @@ def compile_robot(cfg: Config) -> bool:
 
 
 def check_robot_compiled(cfg: Config) -> bool:
-    """Checks if the Maven-built robot JAR and dependency dir exist."""
+    """Checks if essential Maven build artifacts exist."""
     maven_project_dir = cfg.get_path("maven_project_dir")
     if not maven_project_dir or not maven_project_dir.is_dir():
         log.debug("Maven project directory not configured or not found.")
@@ -225,63 +210,79 @@ def check_robot_compiled(cfg: Config) -> bool:
     version = cfg.get("maven.version", "1.0-SNAPSHOT")
     target_dir = maven_project_dir / "target"
     expected_jar_file = target_dir / f"{artifact_id}-{version}.jar"
-    dep_dir = target_dir / "lib"
-
     jar_exists = expected_jar_file.is_file()
-    deps_exist = dep_dir.is_dir() and any(dep_dir.glob("*.jar"))
-
-    if jar_exists and deps_exist:
-        log.debug(f"Found Maven-built robot JAR: {expected_jar_file}")
-        log.debug(f"Found Maven dependency JARs in: {dep_dir}")
-        return True
-    else:
-        if not jar_exists:
-            log.debug(f"Maven-built robot JAR not found: {expected_jar_file}")
-        if not deps_exist:
-            log.debug(f"Maven dependency directory/JARs not found or empty: {dep_dir}")
+    if not jar_exists:
+        log.error(f"Robot JAR file not found: {expected_jar_file}")
         return False
+    log.debug(f"Found Robot JAR: {expected_jar_file}")
+
+    dep_dir = target_dir / "lib"
+    deps_exist = dep_dir.is_dir() and any(dep_dir.glob("*.jar"))
+    if not deps_exist:
+        log.error(f"Dependency directory ({dep_dir}) not found or empty.")
+        return False
+    log.debug(f"Found Dependency JARs in: {dep_dir}")
+
+    if not check_robot_class_file(cfg):
+        return False
+
+    log.info("Verified essential robot build artifacts exist.")
+    return True
 
 
 def start_tensorboard(cfg: Config, pm: ProcessManager) -> bool:
-    """Starts the TensorBoard process."""
     log_dir = cfg.get_path("log_dir")
     if not log_dir:
         log.error("Log directory path not found for TensorBoard.")
         return False
-    tensorboard_log = log_dir / "tensorboard.log"
+    tensorboard_log_file = log_dir / "tensorboard.log"
 
-    cmd = ["tensorboard", f"--logdir={log_dir.resolve()}"]
+    tb_log_level = cfg.get("logging.tensorboard_file_level", "WARNING")
+    verbosity_map = {
+        "DEBUG": "0",
+        "INFO": "0",
+        "WARNING": "1",
+        "ERROR": "2",
+        "CRITICAL": "3",
+    }
+    tb_verbosity = verbosity_map.get(tb_log_level.upper(), "1")
+
+    cmd = [
+        "tensorboard",
+        f"--logdir={log_dir.resolve()}",
+        f"--verbosity={tb_verbosity}",
+    ]
     if cfg.get("tensorboard.bind_all", False):
         cmd.append("--bind_all")
     else:
         cmd.append("--host=localhost")
 
+    log.info(f"Starting TensorBoard (Log Level approx: {tb_log_level})...")
+
     return pm.start_process(
         name="tensorboard",
         cmd=cmd,
         cwd=cfg.project_root,
-        log_path=tensorboard_log,
+        log_path=tensorboard_log_file,
         log_prefix=TBOARD_PREFIX,
+        start_new_session=False,
     )
 
 
 def start_server(cfg: Config, pm: ProcessManager) -> bool:
-    """Starts the Python RL server process."""
     server_dir = cfg.get_path("server_dir")
     log_dir = cfg.get_path("log_dir")
     if not server_dir or not log_dir:
         log.error("Server directory or log directory path not found.")
         return False
-    server_log = log_dir / "server.log"
+    server_log_file = log_dir / "server.log"
 
     python_exe = cfg.get("server.python_exe_resolved")
     server_script = cfg.get_server_script_path()
+    server_file_log_level = cfg.get("logging.server_file_level", "INFO")
 
     if not python_exe:
         log.error("Python executable path was not resolved.")
-        return False
-    if not server_script.is_file():
-        log.error(f"Server script not found: {server_script}")
         return False
 
     cmd = [
@@ -296,28 +297,49 @@ def start_server(cfg: Config, pm: ProcessManager) -> bool:
         "--log-dir",
         str(log_dir.resolve()),
         "--log-level",
-        cfg.get("logging.python_log_level", "INFO"),
+        server_file_log_level,
+        "--state-dims",
+        str(cfg.get("server.state_dims", 8)),
+        "--actions",
+        str(cfg.get("server.actions", 6)),
+        "--hidden-dims",
+        str(cfg.get("server.hidden_dims", 32)),
+        "--learning-rate",
+        str(cfg.get("server.learning_rate", 1e-4)),
+        "--gamma",
+        str(cfg.get("server.gamma", 0.99)),
+        "--batch-size",
+        str(cfg.get("server.batch_size", 32)),
+        "--replay-capacity",
+        str(cfg.get("server.replay_capacity", 10000)),
+        "--save-freq",
+        str(cfg.get("server.save_frequency", 1000)),
+        "--weights-file-name",
+        cfg.get("server.weights_file_name", "network_weights.onnx"),
+        "--device",
+        cfg.get("server.device", "auto"),
     ]
 
     env = os.environ.copy()
     env["TF_CPP_MIN_LOG_LEVEL"] = "2"
 
-    log.debug(f"Starting server with command: {' '.join(cmd)}")
+    log.info(f"Starting Python Server (Log Level: {server_file_log_level})...")
+    log.debug(f"Server Command: {shlex.join(cmd)}")
     log.debug(f"Server CWD: {server_dir}")
 
     started = pm.start_process(
         name="server",
         cmd=cmd,
         cwd=server_dir,
-        log_path=server_log,
+        log_path=server_log_file,
         log_prefix=SERVER_PREFIX,
         env=env,
+        start_new_session=True,
     )
     return started
 
 
 def wait_for_server_ports(cfg: Config) -> bool:
-    """Waits for the server's TCP and UDP ports to become available."""
     ip = cfg.get("server.ip")
     tcp_port = cfg.get("server.weight_port")
     udp_port = cfg.get("server.learn_port")
@@ -331,80 +353,91 @@ def wait_for_server_ports(cfg: Config) -> bool:
     )
 
 
+def _ensure_tmux_session(session_name: str) -> bool:
+    """Checks if a tmux session exists, creates it if not."""
+    try:
+        check_cmd = [TMUX_COMMAND, "has-session", "-t", session_name]
+        log.debug(f"Checking for tmux session: {shlex.join(check_cmd)}")
+        result = subprocess.run(check_cmd, capture_output=True, text=True)
+
+        if result.returncode == 0:
+            log.info(f"Tmux session '{session_name}' already exists.")
+            return True
+        else:
+            log.info(f"Tmux session '{session_name}' not found. Creating...")
+            create_cmd = [
+                TMUX_COMMAND,
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+            ]
+            log.debug(f"Creating tmux session: {shlex.join(create_cmd)}")
+            create_result = subprocess.run(
+                create_cmd, check=True, capture_output=True, text=True
+            )
+            log.info(f"Tmux session '{session_name}' created successfully.")
+            return True
+
+    except FileNotFoundError:
+        log.error(f"'{TMUX_COMMAND}' command not found while trying to ensure session.")
+        return False
+    except subprocess.CalledProcessError as e:
+        log.error(f"Error ensuring tmux session '{session_name}': {e}")
+        log.error(f"Command: {e.cmd}")
+        log.error(f"Stderr: {e.stderr}")
+        return False
+    except Exception as e:
+        log.error(f"Unexpected error ensuring tmux session '{session_name}': {e}")
+        return False
+
+
 def start_robocode_instance(instance_id: int, cfg: Config, pm: ProcessManager) -> bool:
-    """Starts a single Robocode instance using Maven build artifacts."""
     instance_name = f"robocode_{instance_id}"
     log_dir = cfg.get_path("log_dir")
     if not log_dir:
-        log.error(f"Log directory path not found for Robocode instance {instance_id}.")
+        log.error(f"Log dir path not found for Robocode {instance_id}.")
         return False
-    instance_log = log_dir / f"{instance_name}.log"
-
+    instance_log_file = log_dir / f"{instance_name}.log"
     robocode_home = cfg.get_path("robocode_home")
     maven_project_dir = cfg.get_path("maven_project_dir")
     battle_file = cfg.get_path("generated_battle_file")
-
     if not all([robocode_home, maven_project_dir, battle_file]):
-        log.error(
-            f"Missing required paths (Robocode home, Maven dir, or Battle file) for Robocode instance {instance_id}."
-        )
+        log.error(f"Missing paths for Robocode {instance_id}.")
         return False
     if not robocode_home.is_dir():
-        log.error(f"Robocode home directory not found: {robocode_home}")
+        log.error(f"Robocode home not found: {robocode_home}")
         return False
     if not maven_project_dir.is_dir():
-        log.error(f"Maven project directory not found: {maven_project_dir}")
+        log.error(f"Maven project dir not found: {maven_project_dir}")
         return False
     if not battle_file.is_file():
-        log.error(f"Generated battle file not found: {battle_file}")
+        log.error(f"Battle file not found: {battle_file}")
         return False
-
     cp_parts: List[str] = []
-
     robocode_libs_dir = robocode_home / "libs"
-    if robocode_libs_dir.is_dir():
-        cp_parts.append(str(robocode_libs_dir.resolve() / "*"))
-        log.debug(f"Adding Robocode libs path: {robocode_libs_dir.resolve() / '*'}")
-    else:
-        log.warning(
-            f"Robocode libs directory not found: {robocode_libs_dir}. Classpath may be incomplete."
-        )
-
+    log.warning(
+        f"Robocode libs dir not found: {robocode_libs_dir}."
+    ) if not robocode_libs_dir.is_dir() else cp_parts.append(
+        str(robocode_libs_dir.resolve() / "*")
+    )
     artifact_id = cfg.get("maven.artifact_id", "plato-robot")
     version = cfg.get("maven.version", "1.0-SNAPSHOT")
     target_dir = maven_project_dir / "target"
     robot_jar = target_dir / f"{artifact_id}-{version}.jar"
-    if robot_jar.is_file():
+    if not robot_jar.is_file():
+        log.error(f"Robot JAR not found: {robot_jar}.")
+        return False
+    else:
         cp_parts.append(str(robot_jar.resolve()))
-        log.debug(f"Adding robot JAR to classpath: {robot_jar.resolve()}")
-    else:
-        log.error(
-            f"Robot JAR not found: {robot_jar}. Ensure Maven build was successful before starting Robocode."
-        )
-        return False
-
     dependency_lib_dir = target_dir / "lib"
-    if dependency_lib_dir.is_dir() and any(dependency_lib_dir.glob("*.jar")):
-        cp_parts.append(str(dependency_lib_dir.resolve() / "*"))
-        log.debug(f"Adding dependency libs path: {dependency_lib_dir.resolve() / '*'}")
-    else:
-        log.warning(
-            f"Maven dependency directory ({dependency_lib_dir}) not found or empty. Runtime dependencies might be missing."
-        )
-
+    log.warning(f"Maven dep dir ({dependency_lib_dir}) not found or empty.") if not (
+        dependency_lib_dir.is_dir() and any(dependency_lib_dir.glob("*.jar"))
+    ) else cp_parts.append(str(dependency_lib_dir.resolve() / "*"))
     robocode_classpath = expand_classpath_wildcards(cp_parts)
-    if not robocode_classpath:
-        log.error(
-            "Failed to construct Robocode classpath. expand_classpath_wildcards returned empty."
-        )
-        return False
+    log.debug(f"Instance {instance_id} CP Length: {len(robocode_classpath)}")
 
-    log.debug(f"Instance {instance_id} Classpath Length: {len(robocode_classpath)}")
-    log.debug(
-        f"Instance {instance_id} Classpath (first 300 chars): {robocode_classpath[:300]}..."
-    )
-
-    robocode_cmd = [
+    java_cmd_base_list = [
         "java",
         "-Xmx512M",
         "--add-opens",
@@ -416,27 +449,119 @@ def start_robocode_instance(instance_id: int, cfg: Config, pm: ProcessManager) -
         "-DNOSECURITY=true",
         f"-Drobocode.home={robocode_home.resolve()}",
         "-Dfile.encoding=UTF-8",
-        "-cp",
-        robocode_classpath,
-        "robocode.Robocode",
-        "-battle",
-        str(battle_file.resolve()),
-        "-tps",
-        str(cfg.get("robocode.tps")),
     ]
 
-    if not cfg.get("robocode.gui", False):
-        robocode_cmd.append("-nodisplay")
-        log.info(f"Starting Robocode instance {instance_id} WITHOUT GUI.")
+    robot_log_level = cfg.get("logging.robot_file_level", "INFO").lower()
+    java_cmd_base_list.append(
+        f"-Dorg.slf4j.simpleLogger.defaultLogLevel={robot_log_level}"
+    )
+    java_cmd_base_list.append(
+        f"-Dorg.slf4j.simpleLogger.logFile={instance_log_file.resolve()}"
+    )
+    java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.cacheOutputStream=true")
+    if cfg.get("logging.slf4j_show_datetime", DEFAULT_SLF4J_SHOW_DATETIME):
+        java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.showDateTime=true")
+        dt_format = cfg.get(
+            "logging.slf4j_datetime_format", DEFAULT_SLF4J_DATETIME_FORMAT
+        )
+        java_cmd_base_list.append(
+            f"-Dorg.slf4j.simpleLogger.dateTimeFormat={dt_format}"
+        )
     else:
-        log.info(f"Starting Robocode instance {instance_id} WITH GUI.")
+        java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.showDateTime=false")
+    if cfg.get("logging.slf4j_show_thread_name", DEFAULT_SLF4J_SHOW_THREAD_NAME):
+        java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.showThreadName=true")
+    else:
+        java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.showThreadName=false")
+    if cfg.get("logging.slf4j_show_log_name", DEFAULT_SLF4J_SHOW_LOG_NAME):
+        java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.showLogName=true")
+        if cfg.get(
+            "logging.slf4j_show_short_log_name", DEFAULT_SLF4J_SHOW_SHORT_LOG_NAME
+        ):
+            java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.showShortLogName=true")
+        else:
+            java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.showShortLogName=false")
+    else:
+        java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.showLogName=false")
+    if cfg.get("logging.slf4j_level_in_brackets", DEFAULT_SLF4J_LEVEL_IN_BRACKETS):
+        java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.levelInBrackets=true")
+    else:
+        java_cmd_base_list.append("-Dorg.slf4j.simpleLogger.levelInBrackets=false")
+    warn_str = cfg.get(
+        "logging.slf4j_warn_level_string", DEFAULT_SLF4J_WARN_LEVEL_STRING
+    )
+    java_cmd_base_list.append(f"-Dorg.slf4j.simpleLogger.warnLevelString={warn_str}")
 
+    java_cmd_base_list.extend(
+        [
+            "-cp",
+            robocode_classpath,
+            "robocode.Robocode",
+            "-battle",
+            str(battle_file.resolve()),
+            "-tps",
+            str(cfg.get("robocode.tps")),
+        ]
+    )
+
+    if not cfg.get("robocode.gui", False):
+        java_cmd_base_list.append("-nodisplay")
+        gui_mode = "WITHOUT GUI"
+    else:
+        gui_mode = "WITH GUI"
+
+    separate_consoles = cfg.get("logging.separate_robot_consoles", False)
+    final_cmd: List[str] = []
+    stdout_redir = subprocess.PIPE
+    stderr_redir = subprocess.STDOUT
+    start_new_session = True
     robo_prefix = f"{ROBO_PREFIX_BASE}{instance_id}]{Style.RESET_ALL}"
+
+    if separate_consoles:
+        session_name = cfg.get("logging.tmux_session_name", DEFAULT_TMUX_SESSION_NAME)
+        window_name = f"Robo-{instance_id}"
+
+        if not _ensure_tmux_session(session_name):
+            log.error(
+                f"Failed to ensure tmux session '{session_name}' exists. Cannot start Robocode instance {instance_id} in tmux."
+            )
+            return False
+
+        log.info(
+            f"Starting Robocode instance {instance_id} {gui_mode} in tmux window '{window_name}' (session: '{session_name}')."
+        )
+
+        java_command_str = shlex.join(java_cmd_base_list)
+
+        final_cmd = [
+            TMUX_COMMAND,
+            "new-window",
+            "-d",
+            "-n",
+            window_name,
+            "-t",
+            f"{session_name}:",
+            f'{java_command_str} ; printf "\\n----- Robocode ({instance_id}) exited. Press Enter to close window -----\\n" ; read -r',
+        ]
+        log.debug(f"Tmux launch command: {shlex.join(final_cmd)}")
+
+        stdout_redir = None
+        stderr_redir = None
+        start_new_session = False
+
+    else:
+        log.info(
+            f"Starting Robocode instance {instance_id} {gui_mode} with output to file: {instance_log_file}"
+        )
+        final_cmd = java_cmd_base_list
 
     return pm.start_process(
         name=instance_name,
-        cmd=robocode_cmd,
+        cmd=final_cmd,
         cwd=robocode_home,
-        log_path=instance_log,
+        log_path=instance_log_file,
         log_prefix=robo_prefix,
+        stdout_redir=stdout_redir,
+        stderr_redir=stderr_redir,
+        start_new_session=start_new_session,
     )

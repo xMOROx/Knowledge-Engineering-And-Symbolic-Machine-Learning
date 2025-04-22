@@ -1,8 +1,8 @@
 robocode:
   home: "/home/patryk/robocode"
-  instances: 1
-  tps: 150
-  gui: true
+  instances: 2
+  tps: 300
+  gui: false
   battle_file: "train.battle"
   my_robot_name: "pl.agh.edu.plato.PlatoRobot*"
   opponents: ["sample.SittingDuck"]
@@ -19,10 +19,33 @@ server:
   weight_port: 8001
   python_exe: "python3"
   script_name: "main.py"
+  # state_dims: 8
+  # actions: 6
+  # hidden_dims: 32
+  # learning_rate: 0.0001
+  # gamma: 0.99
+  # batch_size: 32
+  # replay_capacity: 10000
+  # save_frequency: 1000
+  # weights_file_name: "network_weights.onnx" # Default used by server.py
+  # device: "auto" # cpu, cuda, or auto
 
 logging:
-  log_dir: "./logs"
-  python_log_level: "INFO"
+  log_dir: "./plato_logs_detailed"
+  orchestrator_console_level: "INFO"
+  server_file_level: "INFO"
+  robot_file_level: "INFO"
+  tensorboard_file_level: "WARNING"
+  maven_capture_level: "INFO"
+  separate_robot_consoles: true
+  tmux_session_name: "plato_training"
+  slf4j_show_datetime: true
+  slf4j_datetime_format: "HH:mm:ss:SSS"
+  slf4j_show_thread_name: false
+  slf4j_show_log_name: true
+  slf4j_show_short_log_name: true
+  slf4j_level_in_brackets: true
+  slf4j_warn_level_string: "[WARN]"
 
 tensorboard:
   bind_all: false
@@ -32,4 +55,7 @@ project_paths:
   maven_project_dir: "plato-robot"
 
 script_behavior:
+  clean_logs: true
+  compile_robot: true
+  tail_logs: true
   initial_server_wait: 10

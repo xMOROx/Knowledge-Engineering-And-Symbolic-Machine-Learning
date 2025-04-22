@@ -33,7 +33,7 @@ try:
     from plato_setup.constants import (
         DEFAULT_CONFIG_FILENAME,
         PROJECT_ROOT,
-        REQUIRED_COMMANDS,
+        DEFAULT_TMUX_SESSION_NAME,
     )
 except ImportError as e:
     print(
@@ -71,7 +71,7 @@ except ImportError as e:
         from plato_setup.constants import (
             DEFAULT_CONFIG_FILENAME,
             PROJECT_ROOT,
-            REQUIRED_COMMANDS,
+            DEFAULT_TMUX_SESSION_NAME,
         )
     else:
         sys.exit(1)
@@ -169,8 +169,8 @@ def parse_arguments():
     server_group.add_argument(
         "-l",
         "--log-level",
-        dest="logging.python_log_level",
-        help="Override Python server log level (DEBUG, INFO, etc.).",
+        dest="logging.server_file_level",
+        help="Override Python SERVER FILE log level (DEBUG, INFO, etc.).",
     )
 
     behavior_group = parser.add_argument_group("Script Behavior")
@@ -210,13 +210,29 @@ def parse_arguments():
         action="store_true",
         dest="flag_tail_logs",
         default=None,
-        help="Enable live log tailing (default: True).",
+        help="Enable live log tailing for non-tmux processes (default: True).",
     )
     tail_group.add_argument(
         "--no-tail",
         action="store_false",
         dest="flag_tail_logs",
         help="Disable live log tailing.",
+    )
+
+    tmux_group = behavior_group.add_mutually_exclusive_group()
+    tmux_group.add_argument(
+        "--tmux",
+        action="store_const",
+        const=True,
+        dest="logging.separate_robot_consoles",
+        help="Override config to force using tmux for robot consoles.",
+    )
+    tmux_group.add_argument(
+        "--no-tmux",
+        action="store_const",
+        const=False,
+        dest="logging.separate_robot_consoles",
+        help="Override config to disable using tmux for robot consoles.",
     )
 
     verbosity_group = parser.add_mutually_exclusive_group()
@@ -258,6 +274,8 @@ def parse_arguments():
                 script_flags[key] = value
             elif key == "script_log_level":
                 script_flags[key] = value
+            elif key in ["logging.separate_robot_consoles"]:
+                overrides[key] = value
             elif "." in key:
                 overrides[key] = value
 
@@ -287,15 +305,41 @@ Keys should be under their respective sections (e.g., 'robocode', 'server').
   ip:                   IP address the Python server binds to (Required).
   learn_port:           UDP port for learning data (Required).
   weight_port:          TCP port for weights/control (Required).
-  python_exe:           Python executable to run the server (Required, e.g., python3 or /path/to/venv/bin/python).
-  script_name:          Name of the main server script (Optional, default: {DEFAULT_SERVER_SCRIPT}).
+  python_exe:           Python executable to run the server (Required).
+  # script_name:        Name of the main server script (Optional, default: main.py).
+  # Other server parameters like state_dims, actions, lr, gamma etc. can be added here
+  # and passed via args in plato_setup/tasks.py::start_server
 
 {Style.BRIGHT}logging:{Style.RESET_ALL}
-  log_dir:              Directory to store log files (Required). Can be relative or absolute.
-  python_log_level:     Log level for the Python server (DEBUG, INFO, etc.) (Required).
+  log_dir:              Directory for all log files (Required).
+  orchestrator_console_level: Log level for this script's console (INFO). (Overridden by -v/-q)
+  server_file_level:    Log level for the python server's FILE log (INFO). (Overridden by -l)
+  robot_file_level:     Log level for robocode robot's FILE logs (INFO). (Passed via -D)
+  tensorboard_file_level: Log level for tensorboard process FILE log (WARNING).
+  maven_capture_level:  Log level for capturing Maven output in script log (INFO).
+  separate_robot_consoles: Launch robots in separate tmux windows? (false). (Overridden by --tmux/--no-tmux)
+  tmux_session_name:    Name for the tmux session if used (plato_rl).
+  # Optional SLF4J formatting properties for robot file logs:
+  # slf4j_show_datetime: true
+  # slf4j_datetime_format: "yyyy-MM-dd HH:mm:ss:SSS"
+  # slf4j_show_thread_name: false
+  # slf4j_show_log_name: true
+  # slf4j_show_short_log_name: false
+  # slf4j_level_in_brackets: true
+  # slf4j_warn_level_string: "WARN"
 
 {Style.BRIGHT}tensorboard:{Style.RESET_ALL}
-  bind_all:             Bind TensorBoard to all interfaces (true/false) (Required).
+  bind_all:             Bind TensorBoard to all interfaces (false).
+
+{Style.BRIGHT}project_paths:{Style.RESET_ALL}
+  maven_project_dir:    Path to the plato-robot Maven project (Required).
+  # server_dir:         Path to the plato-server Python code (Optional, default: plato-server).
+
+{Style.BRIGHT}script_behavior:{Style.RESET_ALL} (Optional section)
+  # clean_logs:         Clean log dir on startup (true). (Overridden by --clean/--no-clean)
+  # compile_robot:      Compile robot on startup (true). (Overridden by --compile/--no-compile)
+  # tail_logs:          Tail logs to console if not using tmux (true). (Overridden by --tail/--no-tail)
+  # initial_server_wait: Seconds to wait after server ports ready before starting robocode (10).
 
 Paths under 'project_paths' and relative 'log_dir' are resolved relative to the project root ({PROJECT_ROOT}).
 """)
@@ -327,8 +371,9 @@ def main():
 
     config_path_arg, overrides, script_flags = parse_arguments()
 
-    script_log_level = script_flags.get("script_log_level", "INFO")
-    setup_logging(script_log_level)
+    script_log_level_flag = script_flags.get("script_log_level")
+    temp_log_level = script_log_level_flag if script_log_level_flag else "INFO"
+    setup_logging(temp_log_level)
 
     log_info(
         f"{Style.BRIGHT}>>> Starting Plato Training Setup ({SCRIPT_NAME} v{SCRIPT_VERSION}) <<<{Style.RESET_ALL}"
@@ -336,8 +381,17 @@ def main():
 
     try:
         cfg = Config(config_path=config_path_arg, overrides=overrides)
-
         generated_battle_file_to_clean = cfg.get_path("generated_battle_file")
+
+        final_script_log_level = script_log_level_flag or cfg.get(
+            "logging.orchestrator_console_level", "INFO"
+        )
+        if final_script_log_level.upper() != temp_log_level.upper():
+            log_info(
+                f"Setting orchestrator console log level to: {final_script_log_level.upper()}"
+            )
+            setup_logging(final_script_log_level)
+
     except ConfigError as e:
         log_error(f"Configuration Error: {e}")
         sys.exit(1)
@@ -352,8 +406,11 @@ def main():
         "flag_compile_robot", cfg.get("script_behavior.compile_robot", True)
     )
     do_tail_logs = script_flags.get(
-        "flag_tail_logs", cfg.get("script_behavior.tail_logs", True)
+        "flag_tail_logs",
+        cfg.get("script_behavior.tail_logs", True)
+        and not cfg.get("logging.separate_robot_consoles"),
     )
+    use_tmux = cfg.get("logging.separate_robot_consoles", False)
 
     print("--- Configuration Summary ---")
     print(f" My Robot:           {cfg.get('robocode.my_robot_name', 'N/A')}")
@@ -370,17 +427,30 @@ def main():
     print(
         f" Server Addr:        {cfg.get('server.ip', 'N/A')}:{cfg.get('server.weight_port', 'N/A')}(TCP)/{cfg.get('server.learn_port', 'N/A')}(UDP)"
     )
-    print(f" Python Log Level:   {cfg.get('logging.python_log_level', 'N/A')}")
-    log_dir_path = cfg.get_path("log_dir")
-    print(f" Log Directory:      {log_dir_path if log_dir_path else 'N/A'}")
+    print(f" Log Directory:      {cfg.get_path('log_dir') or 'N/A'}")
+    print("--- Logging Levels ---")
+    print(f"  Orchestrator Console: {final_script_log_level.upper()}")
+    print(
+        f"  Server File Log:      {cfg.get('logging.server_file_level', 'N/A').upper()}"
+    )
+    print(
+        f"  Robot File Log:       {cfg.get('logging.robot_file_level', 'N/A').upper()}"
+    )
+    print(
+        f"  TensorBoard File Log: {cfg.get('logging.tensorboard_file_level', 'N/A').upper()}"
+    )
+    print(
+        f"  Maven Capture:        {cfg.get('logging.maven_capture_level', 'N/A').upper()}"
+    )
+    print("--- Script Behavior ---")
     print(f" Clean Logs:         {do_clean_logs}")
     print(f" Compile Robot:      {do_compile}")
-    print(f" Tail Logs:          {do_tail_logs}")
-    print(f" Script Log Level:   {script_log_level.upper()}")
+    print(f" Use Tmux Consoles:  {use_tmux}")
+    print(f" Tail Logs to Script:{do_tail_logs}")
     print("---------------------------")
 
     log_info("Performing sanity checks...")
-    check_required_commands(REQUIRED_COMMANDS)
+    check_required_commands(cfg.required_commands)
     log_info("Sanity checks passed.")
 
     log_dir = cfg.get_path("log_dir")
@@ -422,6 +492,7 @@ def main():
         pm.enable_global_tailing()
     else:
         pm.disable_global_tailing()
+        log_info("Log tailing to orchestrator console is disabled.")
 
     if not start_tensorboard(cfg, pm):
         log_warn("Failed to start TensorBoard (continuing without it).")
@@ -450,7 +521,7 @@ def main():
 
     log_info(f"Starting {cfg.get('robocode.instances', 0)} Robocode instance(s)...")
     robocode_start_failures = 0
-    num_instances = cfg.get("robocode.instances", 1)
+    num_instances = cfg.get("robocode.instances", 0)
     successful_starts = 0
     for i in range(1, num_instances + 1):
         if start_robocode_instance(i, cfg, pm):
@@ -470,7 +541,14 @@ def main():
     log_info(
         f"{Style.BRIGHT}>>> Setup complete. Training is running. <<<{Style.RESET_ALL}"
     )
-    if not do_tail_logs:
+    if use_tmux:
+        log_info(
+            f"Robot consoles running in tmux session: {cfg.get('logging.tmux_session_name', DEFAULT_TMUX_SESSION_NAME)}"
+        )
+        log_info(
+            f"Attach with: tmux attach -t {cfg.get('logging.tmux_session_name', DEFAULT_TMUX_SESSION_NAME)}"
+        )
+    elif not do_tail_logs:
         log_info("Log tailing disabled (--no-tail). Check log files in:")
         log_info(f"  {log_dir}")
     log_warn(">>> Press Ctrl+C to stop all processes. <<<")
@@ -490,7 +568,8 @@ def main():
             ]
 
             if successful_starts > 0 and not robo_procs_alive:
-                log_error("All Robocode instances terminated unexpectedly. Stopping...")
+                log_warn("All Robocode instances seem to have terminated.")
+                log_error("Assuming unexpected termination of Robocode. Stopping...")
                 break
 
             time.sleep(5)

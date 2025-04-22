@@ -14,12 +14,27 @@ from .constants import (
     DEFAULT_SERVER_SCRIPT,
     GENERATED_BATTLE_FILENAME,
     PROJECT_ROOT,
-    REQUIRED_COMMANDS,
+    BASE_REQUIRED_COMMANDS,
+    TMUX_COMMAND,
+    LOG_LEVEL_MAP,
+    DEFAULT_LOG_LEVEL_ORCHESTRATOR,
+    DEFAULT_LOG_LEVEL_SERVER,
+    DEFAULT_LOG_LEVEL_ROBOT,
+    DEFAULT_LOG_LEVEL_TENSORBOARD,
+    DEFAULT_LOG_LEVEL_MAVEN,
+    DEFAULT_TMUX_SESSION_NAME,
+    DEFAULT_SLF4J_SHOW_DATETIME,
+    DEFAULT_SLF4J_DATETIME_FORMAT,
+    DEFAULT_SLF4J_SHOW_THREAD_NAME,
+    DEFAULT_SLF4J_SHOW_LOG_NAME,
+    DEFAULT_SLF4J_SHOW_SHORT_LOG_NAME,
+    DEFAULT_SLF4J_LEVEL_IN_BRACKETS,
+    DEFAULT_SLF4J_WARN_LEVEL_STRING,
 )
 
 log = logging.getLogger(__name__)
 
-REQUIRED_SECTIONS = {
+REQUIRED_KEYS_IN_SECTION = {
     "robocode": [
         "home",
         "instances",
@@ -34,21 +49,17 @@ REQUIRED_SECTIONS = {
         "battlefield_height",
     ],
     "server": ["ip", "learn_port", "weight_port", "python_exe"],
-    "logging": ["log_dir", "python_log_level"],
+    "logging": ["log_dir"],
     "tensorboard": ["bind_all"],
     "project_paths": ["maven_project_dir"],
 }
 
 
 class ConfigError(Exception):
-    """Custom exception for configuration errors."""
-
     pass
 
 
 class Config:
-    """Loads, validates, and stores application configuration."""
-
     def __init__(
         self,
         config_path: Optional[Path] = None,
@@ -59,6 +70,7 @@ class Config:
         self.overrides = overrides if overrides else {}
         self.data: Dict[str, Any] = {}
         self.paths: Dict[str, Path] = {}
+        self.required_commands = list(BASE_REQUIRED_COMMANDS)
 
         self._load_and_validate_base()
         self._apply_overrides()
@@ -83,10 +95,57 @@ class Config:
                 f"Root of YAML file {self.config_path} is not a dictionary."
             )
 
+        raw_config.setdefault("robocode", {})
+        raw_config.setdefault("server", {})
+        raw_config.setdefault("logging", {})
+        raw_config.setdefault("tensorboard", {})
+        raw_config.setdefault("project_paths", {})
+        raw_config.setdefault("script_behavior", {})
+
+        log_cfg = raw_config["logging"]
+        log_cfg.setdefault("orchestrator_console_level", DEFAULT_LOG_LEVEL_ORCHESTRATOR)
+        log_cfg.setdefault("server_file_level", DEFAULT_LOG_LEVEL_SERVER)
+        log_cfg.setdefault("robot_file_level", DEFAULT_LOG_LEVEL_ROBOT)
+        log_cfg.setdefault("tensorboard_file_level", DEFAULT_LOG_LEVEL_TENSORBOARD)
+        log_cfg.setdefault("maven_capture_level", DEFAULT_LOG_LEVEL_MAVEN)
+        log_cfg.setdefault("separate_robot_consoles", False)
+        log_cfg.setdefault("tmux_session_name", DEFAULT_TMUX_SESSION_NAME)
+        log_cfg.setdefault("slf4j_show_datetime", DEFAULT_SLF4J_SHOW_DATETIME)
+        log_cfg.setdefault("slf4j_datetime_format", DEFAULT_SLF4J_DATETIME_FORMAT)
+        log_cfg.setdefault("slf4j_show_thread_name", DEFAULT_SLF4J_SHOW_THREAD_NAME)
+        log_cfg.setdefault("slf4j_show_log_name", DEFAULT_SLF4J_SHOW_LOG_NAME)
+        log_cfg.setdefault(
+            "slf4j_show_short_log_name", DEFAULT_SLF4J_SHOW_SHORT_LOG_NAME
+        )
+        log_cfg.setdefault("slf4j_level_in_brackets", DEFAULT_SLF4J_LEVEL_IN_BRACKETS)
+        log_cfg.setdefault("slf4j_warn_level_string", DEFAULT_SLF4J_WARN_LEVEL_STRING)
+
+        proj_paths_cfg = raw_config["project_paths"]
+        proj_paths_cfg.setdefault("server_dir", DEFAULT_SERVER_DIR_REL)
+
+        server_cfg = raw_config["server"]
+        server_cfg.setdefault("script_name", DEFAULT_SERVER_SCRIPT)
+        server_cfg.setdefault("state_dims", 8)
+        server_cfg.setdefault("actions", 6)
+        server_cfg.setdefault("hidden_dims", 32)
+        server_cfg.setdefault("learning_rate", 1e-4)
+        server_cfg.setdefault("gamma", 0.99)
+        server_cfg.setdefault("batch_size", 32)
+        server_cfg.setdefault("replay_capacity", 10000)
+        server_cfg.setdefault("save_frequency", 1000)
+        server_cfg.setdefault("weights_file_name", "network_weights.onnx")
+        server_cfg.setdefault("device", "auto")
+
+        script_b_cfg = raw_config["script_behavior"]
+        script_b_cfg.setdefault("clean_logs", True)
+        script_b_cfg.setdefault("compile_robot", True)
+        script_b_cfg.setdefault("tail_logs", True)
+        script_b_cfg.setdefault("initial_server_wait", 10)
+
         self.data = raw_config
 
         missing_items = []
-        for section, keys in REQUIRED_SECTIONS.items():
+        for section, keys in REQUIRED_KEYS_IN_SECTION.items():
             if section not in self.data:
                 missing_items.append(f"Section '{section}'")
                 continue
@@ -98,76 +157,53 @@ class Config:
 
             for key in keys:
                 if key not in section_data or section_data.get(key) is None:
-                    if section == "robocode" and key == "opponents":
-                        if key not in section_data:
-                            missing_items.append(f"{section}.{key}")
-                    else:
+                    if not (section == "robocode" and key == "opponents"):
                         missing_items.append(f"{section}.{key}")
 
         if missing_items:
             raise ConfigError(
-                f"Missing or empty required configuration items: {', '.join(missing_items)}"
+                f"Missing or null required configuration items: {', '.join(missing_items)}"
             )
 
-        log.debug("Raw loaded config: %s", self.data)
+        log.debug("Raw loaded config (with defaults): %s", self.data)
 
     def _apply_overrides(self):
-        """Applies command-line overrides using dot notation."""
         log.debug("Applying command-line overrides: %s", self.overrides)
         for key_path, value in self.overrides.items():
-            if value is not None:
-                log.info(f"Overriding config: {key_path} = {repr(value)}")
-                keys = key_path.split(".")
-                d = self.data
-                try:
-                    target_dict = d
-                    for i, k in enumerate(keys[:-1]):
-                        if k not in target_dict or not isinstance(target_dict[k], dict):
-                            target_dict[k] = {}
-                        target_dict = target_dict[k]
+            if value is None:
+                continue
 
-                    final_key = keys[-1]
-                    existing_val = target_dict.get(final_key)
-                    converted_value = value
-                    if isinstance(existing_val, bool):
-                        if isinstance(value, bool):
-                            converted_value = value
-                        elif isinstance(value, str):
-                            converted_value = value.lower() in ("true", "1", "yes")
-                        else:
-                            log.warning(
-                                f"Cannot convert override value '{value}' to bool for '{key_path}'"
-                            )
-                    elif isinstance(existing_val, int):
-                        try:
-                            converted_value = int(value)
-                        except (ValueError, TypeError):
-                            log.warning(
-                                f"Cannot convert override value '{value}' to int for '{key_path}'"
-                            )
-                    elif isinstance(existing_val, float):
-                        try:
-                            converted_value = float(value)
-                        except (ValueError, TypeError):
-                            log.warning(
-                                f"Cannot convert override value '{value}' to float for '{key_path}'"
-                            )
+            log.info(f"Overriding config: {key_path} = {repr(value)}")
+            keys = key_path.split(".")
+            d = self.data
+            try:
+                target_dict = d
+                for i, k in enumerate(keys[:-1]):
+                    if k not in target_dict or not isinstance(target_dict[k], dict):
+                        log.warning(
+                            f"Creating intermediate dictionary for override path: {'.'.join(keys[: i + 1])}"
+                        )
+                        target_dict[k] = {}
+                    target_dict = target_dict[k]
 
-                    target_dict[final_key] = converted_value
+                final_key = keys[-1]
+                target_dict[final_key] = value
 
-                except (KeyError, IndexError):
-                    log.warning(
-                        f"Could not apply override {key_path}={value}: Invalid key path."
-                    )
-                except Exception as e:
-                    log.warning(f"Error applying override {key_path}={value}: {e}")
+            except (AttributeError, KeyError, IndexError):
+                log.warning(
+                    f"Could not apply override {key_path}={value}: Invalid key path."
+                )
+            except Exception as e:
+                log.warning(f"Error applying override {key_path}={value}: {e}")
 
     def _derive_paths(self):
-        """Resolve relative paths relative to project_root."""
         project_paths_config = self.data.get("project_paths", {})
 
-        def resolve_path(key: str, default_rel: str) -> Path:
+        def resolve_path(key: str, default_rel: Optional[str] = None) -> Optional[Path]:
             path_str = project_paths_config.get(key, default_rel)
+            if not path_str:
+                return None
+
             path = Path(path_str)
             if not path.is_absolute():
                 path = (self.project_root / path_str).resolve()
@@ -177,11 +213,13 @@ class Config:
             return path
 
         self.paths["server_dir"] = resolve_path("server_dir", DEFAULT_SERVER_DIR_REL)
-        self.paths["maven_project_dir"] = resolve_path(
-            "maven_project_dir", DEFAULT_MAVEN_PROJECT_REL
-        )
+        self.paths["maven_project_dir"] = resolve_path("maven_project_dir")
 
-        log_dir_str = self.get("logging.log_dir", DEFAULT_LOG_DIR_REL)
+        log_dir_str = self.get("logging.log_dir")
+        if not log_dir_str:
+            raise ConfigError(
+                "Internal Error: logging.log_dir missing after validation."
+            )
         log_dir_path = Path(log_dir_str)
         if not log_dir_path.is_absolute():
             log_dir_path = (self.project_root / log_dir_str).resolve()
@@ -192,14 +230,6 @@ class Config:
         if not robocode_home_str:
             raise ConfigError("robocode.home is not defined in config!")
         self.paths["robocode_home"] = Path(robocode_home_str).resolve()
-        if not self.paths["robocode_home"].is_dir():
-            log.warning(
-                f"Configured robocode.home does not exist or is not a directory: {self.paths['robocode_home']}"
-            )
-            raise ConfigError(
-                f"Robocode home directory not found: {self.paths['robocode_home']}"
-            )
-
         log.debug(f"Resolved path 'robocode_home': {self.paths['robocode_home']}")
 
         self.paths["generated_battle_file"] = (
@@ -208,7 +238,6 @@ class Config:
         log.debug(f"Generated battle file path: {self.paths['generated_battle_file']}")
 
     def _post_validation(self):
-        """Perform validation checks after overrides and path derivation."""
         if not self.paths["robocode_home"].is_dir():
             raise ConfigError(
                 f"Robocode home directory not found or not a directory: {self.paths['robocode_home']}"
@@ -219,14 +248,14 @@ class Config:
                 f"Cannot verify robocode.jar in {robocode_jar.parent}. Robocode installation might be incomplete."
             )
 
-        python_exe = self.get("server.python_exe", "python3")
+        python_exe = self.get("server.python_exe")
         resolved_py_exe = shutil.which(python_exe)
         if resolved_py_exe:
-            self.data["server"]["python_exe_resolved"] = resolved_py_exe
+            self.set("server.python_exe_resolved", resolved_py_exe)
         else:
             py_path = Path(python_exe)
             if py_path.is_file() and os.access(py_path, os.X_OK):
-                self.data["server"]["python_exe_resolved"] = str(py_path.resolve())
+                self.set("server.python_exe_resolved", str(py_path.resolve()))
             else:
                 raise ConfigError(
                     f"Python executable '{python_exe}' not found in PATH or is not a valid executable file."
@@ -235,9 +264,69 @@ class Config:
             f"Resolved Python executable: {self.get('server.python_exe_resolved')}"
         )
 
-        for cmd in REQUIRED_COMMANDS:
-            if not shutil.which(cmd):
-                raise ConfigError(f"Required command '{cmd}' not found in PATH.")
+        log_level_keys = [
+            "logging.orchestrator_console_level",
+            "logging.server_file_level",
+            "logging.robot_file_level",
+            "logging.tensorboard_file_level",
+            "logging.maven_capture_level",
+        ]
+        for key_path in log_level_keys:
+            level_str = self.get(key_path)
+            if level_str and str(level_str).upper() not in LOG_LEVEL_MAP:
+                raise ConfigError(
+                    f"Invalid log level '{level_str}' specified for '{key_path}'. Must be one of {list(LOG_LEVEL_MAP.keys())}"
+                )
+            if level_str:
+                self.set(key_path, str(level_str).upper())
+
+        boolean_keys = {
+            "robocode.gui": True,
+            "tensorboard.bind_all": True,
+            "logging.separate_robot_consoles": True,
+            "script_behavior.clean_logs": False,
+            "script_behavior.compile_robot": False,
+            "script_behavior.tail_logs": False,
+        }
+        for key_path, is_required in boolean_keys.items():
+            value = self.get(key_path)
+            if value is None:
+                if is_required:
+                    if key_path == "logging.separate_robot_consoles":
+                        self.set(key_path, False)
+                        value = False
+                    else:
+                        raise ConfigError(
+                            f"Required boolean key '{key_path}' is missing or null."
+                        )
+                else:
+                    continue
+
+            if isinstance(value, bool):
+                continue
+
+            if isinstance(value, str):
+                val_lower = value.lower()
+                if val_lower in ("true", "1", "yes"):
+                    self.set(key_path, True)
+                elif val_lower in ("false", "0", "no"):
+                    self.set(key_path, False)
+                else:
+                    raise ConfigError(
+                        f"Invalid boolean string for '{key_path}': '{value}'. Use true/false."
+                    )
+            else:
+                raise ConfigError(
+                    f"Invalid boolean value for '{key_path}': Expected true/false, got type {type(value).__name__} ('{value}')."
+                )
+
+        if self.get("logging.separate_robot_consoles"):
+            if not shutil.which(TMUX_COMMAND):
+                raise ConfigError(
+                    f"'{TMUX_COMMAND}' command not found, but 'logging.separate_robot_consoles' is enabled. Please install tmux or disable the option."
+                )
+            if TMUX_COMMAND not in self.required_commands:
+                self.required_commands.append(TMUX_COMMAND)
 
         numeric_keys = {
             "robocode.instances": int,
@@ -249,86 +338,77 @@ class Config:
             "robocode.inactivity_time": int,
             "server.learn_port": int,
             "server.weight_port": int,
+            "server.state_dims": int,
+            "server.actions": int,
+            "server.hidden_dims": int,
+            "server.learning_rate": float,
+            "server.gamma": float,
+            "server.batch_size": int,
+            "server.replay_capacity": int,
+            "server.save_frequency": int,
+            "script_behavior.initial_server_wait": int,
         }
         for key_path, num_type in numeric_keys.items():
+            value = self.get(key_path)
+            is_optional = key_path.startswith("script_behavior.")
+
+            if value is None:
+                if not is_optional:
+                    raise ConfigError(
+                        f"Required numeric config key '{key_path}' is missing or null."
+                    )
+                else:
+                    continue
+
             try:
-                value = self.get(key_path)
-                if value is None:
-                    raise ConfigError(f"Numeric config key '{key_path}' is missing.")
                 converted = num_type(value)
-                keys = key_path.split(".")
-                d = self.data
-                for k in keys[:-1]:
-                    d = d[k]
-                d[keys[-1]] = converted
+                if "port" in key_path and not (0 < converted < 65536):
+                    raise ValueError("Port number out of range (1-65535)")
+                if key_path == "robocode.instances" and converted < 1:
+                    raise ValueError("Instances must be at least 1")
+                self.set(key_path, converted)
             except (ValueError, TypeError):
                 raise ConfigError(
                     f"Invalid numeric value for '{key_path}': Expected {num_type.__name__}, got '{value}'."
                 )
-            except KeyError:
-                raise ConfigError(
-                    f"Configuration key '{key_path}' not found during numeric validation."
-                )
 
-        boolean_keys = ["robocode.gui", "tensorboard.bind_all"]
-        for key_path in boolean_keys:
-            try:
-                value = self.get(key_path)
-                if isinstance(value, bool):
-                    continue
-                elif isinstance(value, str):
-                    val_lower = value.lower()
-                    if val_lower in ("true", "1", "yes"):
-                        bool_val = True
-                    elif val_lower in ("false", "0", "no"):
-                        bool_val = False
-                    else:
-                        raise ValueError("Not 'true' or 'false'")
-                    keys = key_path.split(".")
-                    d = self.data
-                    for k in keys[:-1]:
-                        d = d[k]
-                    d[keys[-1]] = bool_val
-                else:
-                    raise ConfigError(
-                        f"Invalid boolean value for '{key_path}': Expected true/false or string, got type {type(value).__name__} ('{value}')."
-                    )
-            except (ValueError, TypeError):
-                raise ConfigError(
-                    f"Invalid boolean value for '{key_path}': Could not convert '{value}' to boolean."
-                )
-            except KeyError:
-                raise ConfigError(
-                    f"Configuration key '{key_path}' not found during boolean validation."
-                )
+        for cmd in BASE_REQUIRED_COMMANDS:
+            if not shutil.which(cmd):
+                raise ConfigError(f"Required command '{cmd}' not found in PATH.")
 
         log.info("Configuration loaded and validated successfully.")
 
     def get(self, key_path: str, default: Any = None) -> Any:
-        """Gets a value using dot notation, e.g., 'robocode.tps'."""
         keys = key_path.split(".")
         value = self.data
         try:
             for key in keys:
                 if not isinstance(value, dict):
-                    log.debug(
-                        f"Attempted to access key '{key}' on non-dictionary value '{value}' while getting '{key_path}'"
-                    )
                     return default
                 value = value[key]
-            return value
+            return value if value is not None else default
         except KeyError:
-            log.debug(
-                f"Key '{key_path}' not found in config, returning default: {default}"
-            )
             return default
 
+    def set(self, key_path: str, value: Any):
+        keys = key_path.split(".")
+        d = self.data
+        try:
+            for k in keys[:-1]:
+                d = d.setdefault(k, {})
+                if not isinstance(d, dict):
+                    log.error(
+                        f"Cannot set '{key_path}', path blocked by non-dictionary at '{k}'"
+                    )
+                    return
+            d[keys[-1]] = value
+        except Exception as e:
+            log.error(f"Failed to set config key '{key_path}': {e}")
+
     def get_path(self, key: str) -> Optional[Path]:
-        """Gets a resolved path stored during _derive_paths."""
         return self.paths.get(key)
 
     def get_opponents_list(self) -> List[str]:
-        """Gets opponents as a list of strings. Handles list or space-separated string."""
         opponents_val = self.get("robocode.opponents", [])
         if isinstance(opponents_val, str):
             return [o.strip() for o in opponents_val.split() if o.strip()]
@@ -341,7 +421,6 @@ class Config:
             return []
 
     def get_my_robot_details(self) -> Dict[str, str]:
-        """Parses the robot name into components (useful for messages/checks)."""
         full_name = self.get("robocode.my_robot_name", "")
         if not full_name:
             raise ConfigError("robocode.my_robot_name is not configured.")
@@ -359,6 +438,16 @@ class Config:
 
         class_file = f"{class_name}.class"
 
+        maven_dir = self.get_path("maven_project_dir")
+        if not maven_dir:
+            raise ConfigError("Maven project directory not resolved for robot details.")
+        robot_bin_dir = maven_dir / "target" / "classes"
+        class_file_path = (
+            robot_bin_dir / package_path / class_file
+            if package_path
+            else robot_bin_dir / class_file
+        )
+
         return {
             "full_name": full_name,
             "name_no_star": name_no_star,
@@ -366,12 +455,15 @@ class Config:
             "class_name": class_name,
             "package_path": package_path,
             "class_file": class_file,
+            "class_file_abs_path": str(class_file_path.resolve()),
         }
 
     def get_server_script_path(self) -> Path:
-        """Gets the absolute path to the server script."""
         server_dir = self.get_path("server_dir")
         if not server_dir:
             raise ConfigError("Server directory path not resolved.")
         script_name = self.get("server.script_name", DEFAULT_SERVER_SCRIPT)
-        return (server_dir / script_name).resolve()
+        path = (server_dir / script_name).resolve()
+        if not path.is_file():
+            raise ConfigError(f"Server script not found at resolved path: {path}")
+        return path
