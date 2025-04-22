@@ -4,8 +4,9 @@
 */**/target/**/*
 */**/lib/**/*
 */**/.settings/**/*
-/logs/**/*
+/*logs*/**/*
 /config/*.properties
 *.hdf5
 .project
 .classpath
+*.log
