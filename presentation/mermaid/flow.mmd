@@ -1,0 +1,80 @@
+graph LR
+    subgraph Orchestrator [Orchestrator 🐍]
+        direction TB
+        O[train.py] -- Reads --> C[📄 config.yaml]
+        O -- Manages --> P[ProcessManager]
+        P -- Starts/Stops --> SP((🧠 RL Server Process))
+        P -- Starts/Stops --> RP((🤖 Robocode Process))
+        P -- Starts/Stops --> TBP((📊 TensorBoard Process))
+        O -- Triggers --> MVN[🛠️ Maven Build]
+    end
+
+    subgraph RLServer [RL Server 🐍]
+        direction TB
+        SP -- Contains --> Main[main.py]
+        Main -- Creates --> ES[📨 Environment Server - UDP]
+        Main -- Creates --> WS[⚖️ Weight Server - HTTP]
+        Main -- Uses --> QNet[🧠 Q-Network - PyTorch]
+        Main -- Uses --> Mem[💾 Replay Memory]
+        Main -- Uses --> Opt[⚙️ Optimizer]
+        Main -- Uses --> TBW[✍️ TensorBoard Writer]
+
+        ES -- Stores --> Mem
+        Mem -- Provides Sample --> QNet
+        QNet -- Trained By --> Opt
+        Opt -- Updates --> QNet
+        QNet -- Logs Metrics --> TBW
+        Mem -- Logs Size --> TBW
+        QNet -- Saves --> ONNX[(📄 network_weights.onnx)]
+        QNet -- Saves --> PT[(💾 network_weights.pt)]
+        WS -- Reads & Serves --> ONNX
+        WS -- Reads & Serves --> UPDATES[(📄 updates.txt)]
+        QNet -- Saves --> UPDATES
+    end
+
+    subgraph Environment [Environment ☕]
+        direction TB
+        RP -- Contains --> Sim[🕹️ Robocode Simulator]
+        Sim -- Runs --> Agent[🤖 PlatoRobot Agent]
+        Agent -- Uses --> NetDJL[🧠 Network]
+        Agent -- Uses --> StateRep[📡 StateReporter - UDP]
+        Agent -- Observes --> GameState[🎮 Game State]
+        GameState --> Agent
+        NetDJL -- Provides Policy --> Agent
+        Agent -- Performs Action --> Sim
+        Sim -- Provides Reward/Events --> Agent
+    end
+
+    subgraph Monitoring [Monitoring - via Browser]
+       TBP -- Visualizes Data From --> TBW
+    end
+
+
+    %% Data Flows %%
+    StateRep -- Experience (S,A,R,S',T) --> ES
+    NetDJL -- Requests Weights (.onnx) --> WS
+    MVN -- Produces --> RobotJAR[(📦 plato-robot.jar + deps)]
+    RobotJAR -- Loaded By --> RP
+
+    %% Style Process Links from Orchestrator %%
+    style SP fill:#ccf,stroke:#333,stroke-width:2px
+    style RP fill:#cfc,stroke:#333,stroke-width:2px
+    style TBP fill:#fcc,stroke:#333,stroke-width:2px
+
+ %% Component Style Definitions %%
+ classDef python fill:#add8e6,stroke:#333,stroke-width:2px,color:#000;
+ classDef java fill:#ffebcd,stroke:#333,stroke-width:2px,color:#000;
+ classDef file fill:#eee,stroke:#666,stroke-width:1px,stroke-dasharray: 5 5,color:#333;
+ classDef process fill:#fffacd,stroke:#333,stroke-width:2px,color:#000;
+ classDef build fill:#d3d3d3,stroke:#333,stroke-width:2px,color:#000;
+ classDef monitoring fill:#f8d7da,stroke:#333,stroke-width:2px,color:#000;
+
+
+ %% Apply Style Classes %%
+ class Orchestrator,O,C,P python;
+ class RLServer,Main,ES,WS,QNet,Mem,Opt,TBW python;
+ class Environment,Sim,Agent,NetDJL,StateRep,GameState java;
+ class Monitoring,TBP monitoring;
+ class ONNX,PT,UPDATES,RobotJAR file;
+ class SP,RP process;
+ class MVN build;

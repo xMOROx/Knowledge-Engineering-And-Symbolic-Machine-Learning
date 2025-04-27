@@ -1,4 +1,3 @@
-# plato_setup/process_manager.py
 import subprocess
 import logging
 import time

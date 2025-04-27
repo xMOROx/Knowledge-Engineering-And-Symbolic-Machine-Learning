@@ -1,0 +1,10 @@
+---
+title: "Robocode Agent -> RL Server UDP Packet"
+---
+packet-beta
+    0-31: "Client ID (int)"
+    32-287: "Start State (8 * float32)"
+    288-295: "Action (byte)"
+    296-327: "Reward (float32)"
+    328-583: "End State (8 * float32)"
+    584-591: "Is Terminal (bool as byte: 0 or 1)"
