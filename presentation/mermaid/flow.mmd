@@ -1,80 +1,102 @@
-graph LR
-    subgraph Orchestrator [Orchestrator 🐍]
+flowchart LR
+    subgraph Orchestrator["Orchestrator 🐍"]
         direction TB
-        O[train.py] -- Reads --> C[📄 config.yaml]
-        O -- Manages --> P[ProcessManager]
-        P -- Starts/Stops --> SP((🧠 RL Server Process))
-        P -- Starts/Stops --> RP((🤖 Robocode Process))
-        P -- Starts/Stops --> TBP((📊 TensorBoard Process))
-        O -- Triggers --> MVN[🛠️ Maven Build]
+        C["📄 config.yaml"]
+        O["train.py"]
+        P["ProcessManager"]
+        SP(("🧠 RL Server Process"))
+        RP(("🤖 Robocode Process"))
+        TBP(("📊 TensorBoard Process"))
+        MVN["🛠️ Maven Build"]
     end
 
-    subgraph RLServer [RL Server 🐍]
+    subgraph RLServer["RL Server 🐍"]
         direction TB
-        SP -- Contains --> Main[main.py]
-        Main -- Creates --> ES[📨 Environment Server - UDP]
-        Main -- Creates --> WS[⚖️ Weight Server - HTTP]
-        Main -- Uses --> QNet[🧠 Q-Network - PyTorch]
-        Main -- Uses --> Mem[💾 Replay Memory]
-        Main -- Uses --> Opt[⚙️ Optimizer]
-        Main -- Uses --> TBW[✍️ TensorBoard Writer]
-
-        ES -- Stores --> Mem
-        Mem -- Provides Sample --> QNet
-        QNet -- Trained By --> Opt
-        Opt -- Updates --> QNet
-        QNet -- Logs Metrics --> TBW
-        Mem -- Logs Size --> TBW
-        QNet -- Saves --> ONNX[(📄 network_weights.onnx)]
-        QNet -- Saves --> PT[(💾 network_weights.pt)]
-        WS -- Reads & Serves --> ONNX
-        WS -- Reads & Serves --> UPDATES[(📄 updates.txt)]
-        QNet -- Saves --> UPDATES
+        Main["main.py"]
+        ES["📨 Environment Server - UDP"]
+        WS["⚖️ Weight Server - HTTP"]
+        QNet["🧠 Q-Network - PyTorch"]
+        Mem["💾 Replay Memory"]
+        Opt["⚙️ Optimizer"]
+        TBW["✍️ TensorBoard Writer"]
+        ONNX[("📄 network_weights.onnx")]
+        PT[("💾 network_weights.pt")]
+        UPDATES[("📄 updates.txt")]
     end
 
-    subgraph Environment [Environment ☕]
+    subgraph Environment["Environment ☕"]
         direction TB
-        RP -- Contains --> Sim[🕹️ Robocode Simulator]
-        Sim -- Runs --> Agent[🤖 PlatoRobot Agent]
-        Agent -- Uses --> NetDJL[🧠 Network]
-        Agent -- Uses --> StateRep[📡 StateReporter - UDP]
-        Agent -- Observes --> GameState[🎮 Game State]
-        GameState --> Agent
-        NetDJL -- Provides Policy --> Agent
-        Agent -- Performs Action --> Sim
-        Sim -- Provides Reward/Events --> Agent
+        Sim["🕹️ Robocode Simulator"]
+        Agent["🤖 PlatoRobot Agent"]
+        NetDJL["🧠 Network"]
+        StateRep["📡 StateReporter - UDP"]
+        GameState["🎮 Game State"]
     end
 
-    subgraph Monitoring [Monitoring - via Browser]
-       TBP -- Visualizes Data From --> TBW
+    subgraph Monitoring["Monitoring - via Browser"]
     end
 
-
-    %% Data Flows %%
-    StateRep -- Experience (S,A,R,S',T) --> ES
-    NetDJL -- Requests Weights (.onnx) --> WS
-    MVN -- Produces --> RobotJAR[(📦 plato-robot.jar + deps)]
+    %% Connections %%
+    O -- Reads --> C
+    O -- Manages --> P
+    P -- "Starts/Stops" --> SP
+    P -- "Starts/Stops" --> RP
+    P -- "Starts/Stops" --> TBP
+    O -- Triggers --> MVN
+    SP -- Contains --> Main
+    Main -- Creates --> ES
+    Main -- Creates --> WS
+    Main -- Uses --> QNet
+    Main -- Uses --> Mem
+    Main -- Uses --> Opt
+    Main -- Uses --> TBW
+    ES -- Stores --> Mem
+    Mem -- Provides Sample --> QNet
+    QNet -- Trained By --> Opt
+    Opt -- Updates --> QNet
+    QNet -- Logs Metrics --> TBW
+    Mem -- Logs Size --> TBW
+    QNet -- Saves --> ONNX
+    QNet -- Saves --> PT
+    QNet -- Saves --> UPDATES
+    WS -- "Reads & Serves" --> ONNX
+    WS -- "Reads & Serves" --> UPDATES
+    RP -- Contains --> Sim
+    Sim -- Runs --> Agent
+    Agent -- Uses --> NetDJL
+    Agent -- Uses --> StateRep
+    Agent -- Observes --> GameState
+    GameState --> Agent
+    NetDJL -- Provides Policy --> Agent
+    Agent -- Performs Action --> Sim
+    Sim -- "Provides Reward/Events" --> Agent
+    TBP -- "Visualizes Data From" --> TBW
+    StateRep -- "Experience (S,A,R,S',T)" --> ES
+    NetDJL -- "Requests Weights (.onnx)" --> WS
+    MVN -- Produces --> RobotJAR[("📦 plato-robot.jar + deps")]
     RobotJAR -- Loaded By --> RP
 
-    %% Style Process Links from Orchestrator %%
-    style SP fill:#ccf,stroke:#333,stroke-width:2px
-    style RP fill:#cfc,stroke:#333,stroke-width:2px
-    style TBP fill:#fcc,stroke:#333,stroke-width:2px
+    %% Node Styling Application %%
+    class C,O,P,Main,ES,WS,QNet,Mem,Opt,TBW python
+    class Sim,Agent,NetDJL,StateRep,GameState java
+    class ONNX,PT,UPDATES,RobotJAR file
+    class SP,RP,TBP process
+    class MVN build
 
- %% Component Style Definitions %%
- classDef python fill:#add8e6,stroke:#333,stroke-width:2px,color:#000;
- classDef java fill:#ffebcd,stroke:#333,stroke-width:2px,color:#000;
- classDef file fill:#eee,stroke:#666,stroke-width:1px,stroke-dasharray: 5 5,color:#333;
- classDef process fill:#fffacd,stroke:#333,stroke-width:2px,color:#000;
- classDef build fill:#d3d3d3,stroke:#333,stroke-width:2px,color:#000;
- classDef monitoring fill:#f8d7da,stroke:#333,stroke-width:2px,color:#000;
+    %% Node Style Definitions (Revised Text Colors) %%
+    classDef python fill:#cde4f1,stroke:#77b6e3,stroke-width:2px,color:#000
+    classDef java fill:#fde3c0,stroke:#ffcc80,stroke-width:2px,color:#000  
+    classDef file fill:#444444,stroke:#AAAAAA,stroke-width:1px,stroke-dasharray: 4 4,color:#FFF  
+    classDef process fill:#d4f1f4,stroke:#7ededf,stroke-width:2px,color:#000
+    classDef build fill:#616161,stroke:#bdbdbd,stroke-width:2px,color:#FFF  
+    classDef monitoring fill:#e8dff5,stroke:#ba68c8,stroke-width:2px,color:#000
+    classDef default color:#FFF
 
+    %% Subgraph Styling (Dark Backgrounds, White Titles) %%
+    style Orchestrator fill:#1c1c1c,stroke:#9e9e9e,color:#FFF
+    style RLServer fill:#1c1c1c,stroke:#9e9e9e,color:#FFF
+    style Environment fill:#2d2d2d,stroke:#b0bec5,color:#FFF
+    style Monitoring fill:#331a3f,stroke:#ce93d8,color:#FFF
 
- %% Apply Style Classes %%
- class Orchestrator,O,C,P python;
- class RLServer,Main,ES,WS,QNet,Mem,Opt,TBW python;
- class Environment,Sim,Agent,NetDJL,StateRep,GameState java;
- class Monitoring,TBP monitoring;
- class ONNX,PT,UPDATES,RobotJAR file;
- class SP,RP process;
- class MVN build;
+    %% Link Styling %%
+    linkStyle default stroke:#FFFFFF,stroke-width:1px,fill:none;
