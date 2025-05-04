@@ -14,7 +14,7 @@
 
 # Slajd 2
 
-## Architektura Systemu Plato
+## Architektura Systemu
 
 Szczegółowy diagram przedstawiający komponenty i przepływ danych.
 
