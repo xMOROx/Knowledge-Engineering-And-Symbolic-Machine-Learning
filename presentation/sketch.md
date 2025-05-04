@@ -131,7 +131,7 @@ flowchart LR
 ## Opis Architektury
 
 * **Orchestrator (Python):** Kontroluje całość. `train.py` czyta `config.yaml` i używa `ProcessManager` do zarządzania procesami: Robocode (`RP`), Serwera RL (`SP`) i TensorBoard (`TBP`). Inicjuje też budowanie (`Maven Build`).
-* **RL Server (Python):** Uruchomiony jako proces (`SP`). `main.py` tworzy serwer UDP (`ES`) do odbierania doświadczeń i serwer HTTP (`WS`) do udostępniania wag `.onnx`. Używa `PyTorch` do trenowania sieci Q (`QNet`) na danych z Pamięci Powtórek (`Mem`), aktualizując wagi za pomocą `Optimizera`. Zapisuje metryki (`TBW`) i modele (`.onnx`, `.pt`, `updates.txt`).
+* **RL Server (Python):** Uruchomiony jako proces (`SP`). `main.py` tworzy serwer UDP (`ES`) do odbierania doświadczeń i serwer HTTP (`WS`) do udostępniania wag `.onnx`. Używa `PyTorch` do trenowania sieci Q (`QNet`) na danych z Pamięci Powtórek (`Mem`), aktualizując wagi za pomocą `Optimizer`. Zapisuje metryki (`TBW`) i modele (`.onnx`, `.pt`, `updates.txt`).
 * **Environment (Java/Robocode):** Proces Robocode (`RP`) uruchamia agenta (`PlatoRobot Agent`). Agent używa sieci neuronowej (`NetDJL` - ładowanej z `.onnx`) do podejmowania decyzji na podstawie stanu gry (`GameState`). Wysyła doświadczenia (S,A,R,S',T) przez `StateReporter (UDP)` do serwera (`ES`). Pobiera aktualne wagi (`.onnx`) z serwera (`WS`).
 * **Monitoring:** Proces TensorBoard (`TBP`) wizualizuje metryki zapisane przez serwer RL (`TBW`).
 
@@ -142,7 +142,7 @@ flowchart LR
 ## Jak Robot Się Uczy? (Cykl Treningowy)
 
 1. **Działanie:** Robot w Robocode obserwuje `GameState` i używa swojej lokalnej sieci `NetDJL` (wagi z `.onnx`) do wyboru akcji.
-2. **Doświadczenie:** Wykonuje akcję w `Simulatorze`, obserwuje nowy `GameState` i otrzymuje nagrodę.
+2. **Doświadczenie:** Wykonuje akcję w `Simulator`, obserwuje nowy `GameState` i otrzymuje nagrodę.
 3. **Przesłanie Danych:** `StateReporter` wysyła pakiet UDP z krotką doświadczenia (S,A,R,S',T) do `Environment Server (ES)` na Serwerze RL.
 4. **Nauka na Serwerze:** `ES` zapisuje dane w `Replay Memory (Mem)`. Gdy jest wystarczająco danych, `QNet` jest trenowana na próbce z `Mem` przez `Optimizera`.
 5. **Aktualizacja Wiedzy Robota:** `QNet` jest okresowo zapisywana do pliku `.onnx`. `Weight Server (WS)` udostępnia ten plik. Agent (`NetDJL`) pobiera go przez HTTP i aktualizuje swoją lokalną sieć.
