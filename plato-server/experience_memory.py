@@ -27,9 +27,9 @@ class ExperienceMemory:
         # Index 9 = reward | Index 18 = terminal
         # Original code used index 9 for check. Let's assume state_dims=8 implicitly here.
         # TODO: Make indices dependent on state_dims passed to server?
-        self._reward_idx = 8 + 1  # Assumes action is 1 element
+        self._reward_idx = 6 + 1  # Assumes action is 1 element
         self._terminal_idx = (
-            self._reward_idx + 1 + 8
+            self._reward_idx + 1 + 6
         )  # Assumes next_state is 8 elements
 
     def record_transition(self, transition: torch.Tensor) -> None:

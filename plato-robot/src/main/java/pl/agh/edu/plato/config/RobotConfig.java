@@ -14,9 +14,10 @@ public class RobotConfig {
   }
 
   public static class RlConfig {
-    public double explorationEpsilon = 0.1;
+    public double explorationEpsilonMax = 0.8;
+    public double explorationEpsilonMin = 0.01;
+    public double explorationEpsilonDecrease = 0.002;
   }
-
   public static class TimingConfig {
     public int networkReloadInterval = 1000;
     public int actionInterval = 10;

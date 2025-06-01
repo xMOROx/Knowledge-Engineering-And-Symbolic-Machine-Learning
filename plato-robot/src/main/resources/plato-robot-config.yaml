@@ -4,17 +4,19 @@ server:
   weightPort: 8001
 
 rl:
-  explorationEpsilon: 0.1
+  explorationEpsilonMax: 1.0
+  explorationEpsilonMin: 0.01
+  explorationEpsilonDecrease: 0.002
 
 timing:
   networkReloadInterval: 1000
   actionInterval: 10
 
 rewards:
-  hitMultiplier: 4.0
-  survival: 0.01
-  aimedReady: 0.1
-  penaltyGotHitMultiplier: 1.0
-  penaltyHitWall: 2.0
-  penaltyDeath: 50.0
+  hitMultiplier: 5.0
+  survival: -0.2
+  aimedReady: 5.0
+  penaltyGotHitMultiplier: 3.0
+  penaltyHitWall: 5.0
+  penaltyDeath: 40.0
   win: 50.0
