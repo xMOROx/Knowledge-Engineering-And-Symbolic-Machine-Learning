@@ -103,6 +103,20 @@ def main():
         dest="lr",
         help="Optimizer learning rate.",
     )
+    parser.add_argument(
+        "--learning-rate-min",
+        type=float,
+        default=1e-6,
+        dest="lr_min",
+        help="Minimum learning rate.",
+    )
+    parser.add_argument(
+        "--learning-rate-decrease",
+        type=float,
+        default=1e-7,
+        dest="lr_decrease",
+        help="Learning rate decrease factor per update.",
+    )
     parser.add_argument("--gamma", type=float, default=0.99, help="Discount factor.")
     parser.add_argument(
         "--batch-size", type=int, default=32, help="Training batch size."
@@ -204,6 +218,8 @@ def main():
             updates_filename=updates_file_path,
             lock=lock,
             learning_rate=args.lr,
+            learning_rate_min=args.lr_min,
+            learning_rate_decrease=args.lr_decrease,
             gamma=args.gamma,
             batch_size=args.batch_size,
             replay_capacity=args.replay_capacity,

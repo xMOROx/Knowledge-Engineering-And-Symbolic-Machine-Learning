@@ -44,6 +44,8 @@ class EnvironmentServer:
         updates_filename: str,
         lock: mp.Lock,
         learning_rate: float = 1e-2,
+        learning_rate_min: float = 1e-4,
+        learning_rate_decrease: float = 1e-6,
         gamma: float = 0.95,
         batch_size: int = 32,
         replay_capacity: int = 10000,
@@ -65,6 +67,10 @@ class EnvironmentServer:
         self.device = device
         self.shutdown_event = threading.Event()
 
+        self.learning_rate = learning_rate
+        self.learning_rate_min = learning_rate_min
+        self.learning_rate_decrease = learning_rate_decrease
+
         state_struct = STATE_VAR_TYPE * self.state_dims
         self.packet_format = (
             ">"
@@ -82,7 +88,7 @@ class EnvironmentServer:
         self.updates_counter = 0
 
         self.network = QNetwork(state_dims, action_dims, hidden_dims).to(self.device)
-        self.optimizer = optim.Adam(self.network.parameters(), lr=learning_rate)
+        self.optimizer = optim.Adam(self.network.parameters(), lr=self.learning_rate)
         self.memory = ExperienceMemory(capacity=replay_capacity)
 
         self._initialize_network_state()
@@ -90,7 +96,7 @@ class EnvironmentServer:
 
         env_server_logger.info(
             f"Initialized on {self.device}: state={state_dims}, action={action_dims}, hidden={hidden_dims}, "
-            f"bs={batch_size}, gamma={gamma:.2f}, lr={learning_rate:.1e}, "
+            f"bs={batch_size}, gamma={gamma:.2f}, lr={self.learning_rate:.1e} (min={self.learning_rate_min:.1e}, dec={self.learning_rate_decrease:.1e}), "
             f"replay={replay_capacity}, save_freq={save_frequency}"
         )
         env_server_logger.info(f"ONNX weights file: {self.onnx_weights_filename}")
@@ -588,6 +594,15 @@ class EnvironmentServer:
 
         if self.save_frequency > 0 and current_update_step % self.save_frequency == 0:
             self._save_network()
+            self.decrease_learning_rate()
+
+    def decrease_learning_rate(self):
+        self.learning_rate = max(
+            self.learning_rate_min, self.learning_rate - self.learning_rate_decrease
+        )
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = self.learning_rate
+        env_server_logger.info(f"Learning rate decreased to: {self.learning_rate:.10f}")
 
 
 class WeightServer:

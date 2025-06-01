@@ -36,6 +36,9 @@ public class PlatoRobot extends AdvancedRobot {
   Action lastActionChosen = Action.NOTHING;
   double rewardReceived = 0.0;
   Random randomGenerator = new Random();
+  static HyperparametersLoader hyperparametersLoader;
+  private static double explorationEpsilon;
+
 
   private enum Action {
     FORWARD, BACKWARD, LEFT, RIGHT, FIRE, NOTHING;
@@ -70,7 +73,21 @@ public class PlatoRobot extends AdvancedRobot {
       this.weightServerUrl = "http://" + config.server.ip + ":" + config.server.weightPort;
       logger.info("Configuration loaded.");
       logger.info("Config - Server: {}:{}/{}", config.server.ip, config.server.weightPort, config.server.learningPort);
-      logger.info("Config - Epsilon: {}", config.rl.explorationEpsilon);
+      logger.info("Config - RL: eps_max={}, eps_min={}, eps_dec={}",
+          config.rl.explorationEpsilonMax, config.rl.explorationEpsilonMin, config.rl.explorationEpsilonDecrease);
+
+      if (hyperparametersLoader == null) {
+        hyperparametersLoader = new HyperparametersLoader(
+            config.rl.explorationEpsilonMax,
+            config.rl.explorationEpsilonMin,
+            config.rl.explorationEpsilonDecrease
+        );
+      }
+
+      this.explorationEpsilon = hyperparametersLoader.getCurrentEpsilon();
+      hyperparametersLoader.decreaseEpsilon();
+      logger.info("Initial Epsilon: {}", this.explorationEpsilon);
+
     } catch (ConfigLoadException e) {
       logger.error("FATAL: Configuration loading failed!", e);
       doNothingLoop();
@@ -208,11 +225,11 @@ public class PlatoRobot extends AdvancedRobot {
     }
 
     double[] inputs = {
-        (double) this.currentState.agentHeading, (double) this.currentState.agentEnergy,
-        (double) this.currentState.agentGunHeat,
+        (double) this.currentState.agentSpeed,
+        (double) this.currentState.agentEnergy,
         (double) this.currentState.agentX, (double) this.currentState.agentY,
         (double) this.currentState.opponentBearing,
-        (double) this.currentState.opponentEnergy, (double) this.currentState.distance
+        (double) this.currentState.opponentEnergy
     };
 
     double[] qValues = this.network.evaluate(inputs);
@@ -227,10 +244,10 @@ public class PlatoRobot extends AdvancedRobot {
     }
 
     Action actionToTake;
-    if (randomGenerator.nextDouble() < config.rl.explorationEpsilon) {
+    if (randomGenerator.nextDouble() < this.explorationEpsilon) {
       int randomIndex = randomGenerator.nextInt(expectedActionCount);
       actionToTake = Action.fromInteger(randomIndex);
-      logger.debug("Action @ {} (Random - eps={}): {}", getTime(), config.rl.explorationEpsilon, actionToTake);
+      logger.debug("Action @ {} (Random - eps={}): {}", getTime(), this.explorationEpsilon, actionToTake);
     } else {
       int bestActionIndex = 0;
       double maxQ = -Double.MAX_VALUE;
@@ -281,9 +298,7 @@ public class PlatoRobot extends AdvancedRobot {
   @Override
   public void onScannedRobot(ScannedRobotEvent event) {
     State newState = new State(
-        (float) getHeading(), (float) getEnergy(), (float) getGunHeat(),
-        (float) getX(), (float) getY(), (float) event.getBearing(),
-        (float) event.getEnergy(), (float) event.getDistance());
+        (float) getVelocity(), (float) getEnergy(), (float) getX(), (float) getY(), (float) event.getBearing(), (float) event.getEnergy());
     this.currentState = newState;
 
     double reward = 0.0;
@@ -341,8 +356,7 @@ public class PlatoRobot extends AdvancedRobot {
       } else if (this.previousState != null) {
         finalState = this.previousState;
       } else {
-        finalState = new State((float) getHeading(), (float) getEnergy(), (float) getGunHeat(), (float) getX(),
-            (float) getY(), 0.0f, 0.0f, 0.0f);
+        finalState = new State((float) getVelocity(), (float) getEnergy(),(float) getX(), (float) getY(), 0.0f, 0.0f);
         logger.warn("Using fallback final state in onDeath.");
       }
     } catch (Exception e) {
@@ -381,8 +395,7 @@ public class PlatoRobot extends AdvancedRobot {
       } else if (this.previousState != null) {
         finalState = this.previousState;
       } else {
-        finalState = new State((float) getHeading(), (float) getEnergy(), (float) getGunHeat(), (float) getX(),
-            (float) getY(), 0.0f, 0.0f, 0.0f);
+        finalState = new State((float) getVelocity(), (float) getEnergy(),(float) getX(), (float) getY(), 0.0f, 0.0f);
         logger.warn("Using fallback final state in onWin.");
       }
     } catch (Exception e) {

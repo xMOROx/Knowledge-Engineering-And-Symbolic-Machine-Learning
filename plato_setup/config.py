@@ -129,6 +129,8 @@ class Config:
         server_cfg.setdefault("actions", 6)
         server_cfg.setdefault("hidden_dims", 32)
         server_cfg.setdefault("learning_rate", 1e-4)
+        server_cfg.setdefault("learning_rate_min", 1e-6)
+        server_cfg.setdefault("learning_rate_decrease", 1e-7)
         server_cfg.setdefault("gamma", 0.99)
         server_cfg.setdefault("batch_size", 32)
         server_cfg.setdefault("replay_capacity", 10000)
