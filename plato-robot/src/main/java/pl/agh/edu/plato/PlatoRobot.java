@@ -277,7 +277,9 @@ public class PlatoRobot extends AdvancedRobot {
         break;
       case FIRE:
         if (getGunHeat() == 0 && getEnergy() > 0.1) {
-          setFire(1);
+          double firePower = calculateOptimalFirePower();
+          setFire(firePower);
+          logger.debug("Firing with power: {}", firePower);
         } else {
           logger.debug("Action FIRE chosen, but gun hot/low energy. Skipping fire.");
         }
@@ -293,6 +295,47 @@ public class PlatoRobot extends AdvancedRobot {
     this.previousState = this.currentState;
     this.currentState = null;
     logger.debug("Action {} queued. Shifted states. Waiting for next scan.", this.lastActionChosen);
+  }
+
+  private double calculateOptimalFirePower() {
+    if (currentState == null) {
+      return 1.0; // Default power
+    }
+
+    double bearingAbs = Math.abs(currentState.opponentBearing);
+    double distanceEstimate;
+    
+    if (bearingAbs > 90) {
+      distanceEstimate = 400;
+    } else if (bearingAbs > 45) {
+      distanceEstimate = 250;
+    } else {
+      distanceEstimate = 100; 
+    }
+    
+    double firePower;
+    
+    if (distanceEstimate < 150) {
+      firePower = Math.min(3.0, Math.max(1.5, currentState.opponentEnergy / 8.0));
+    } else if (distanceEstimate < 300) {
+      firePower = Math.min(2.5, Math.max(1.0, currentState.opponentEnergy / 12.0));
+    } else {
+      firePower = Math.min(2.0, Math.max(0.5, currentState.opponentEnergy / 16.0));
+    }
+    
+    double energyBuffer = 2.0; 
+    double maxAffordablePower = Math.min(firePower, getEnergy() - energyBuffer);
+    
+    if (maxAffordablePower <= 0.1) {
+      return 0.1; 
+    }
+    
+    if (getEnergy() < 20) {
+      maxAffordablePower *= 0.7; // Reduce power when energy is low
+    }
+    
+    // Robocode fire power must be between 0.1 and 3.0
+    return Math.min(3.0, Math.max(0.1, maxAffordablePower));
   }
 
   @Override
