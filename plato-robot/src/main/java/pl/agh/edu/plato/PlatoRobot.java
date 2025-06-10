@@ -22,6 +22,30 @@ public class PlatoRobot extends AdvancedRobot {
 
   private static final Logger logger = LoggerFactory.getLogger(PlatoRobot.class);
 
+  // Fire power calculation constants
+  private static final double DEFAULT_FIRE_POWER = 1.0;
+  private static final double BEARING_THRESHOLD_FAR = 90.0;
+  private static final double BEARING_THRESHOLD_MEDIUM = 45.0;
+  private static final double DISTANCE_FAR = 400.0;
+  private static final double DISTANCE_MEDIUM = 250.0;
+  private static final double DISTANCE_CLOSE = 100.0;
+  private static final double CLOSE_RANGE_THRESHOLD = 150.0;
+  private static final double MEDIUM_RANGE_THRESHOLD = 300.0;
+  private static final double MAX_FIRE_POWER_CLOSE = 3.0;
+  private static final double MIN_FIRE_POWER_CLOSE = 1.5;
+  private static final double CLOSE_ENERGY_DIVISOR = 8.0;
+  private static final double MAX_FIRE_POWER_MEDIUM = 2.5;
+  private static final double MIN_FIRE_POWER_MEDIUM = 1.0;
+  private static final double MEDIUM_ENERGY_DIVISOR = 12.0;
+  private static final double MAX_FIRE_POWER_FAR = 2.0;
+  private static final double MIN_FIRE_POWER_FAR = 0.5;
+  private static final double FAR_ENERGY_DIVISOR = 16.0;
+  private static final double ENERGY_BUFFER = 2.0;
+  private static final double MIN_FIRE_POWER = 0.1;
+  private static final double MAX_FIRE_POWER = 3.0;
+  private static final double LOW_ENERGY_THRESHOLD = 20.0;
+  private static final double LOW_ENERGY_POWER_MULTIPLIER = 0.7;
+
   private RobotConfig config;
   private String weightServerUrl;
   private String modelFileName = "network_weights.onnx";
@@ -299,43 +323,41 @@ public class PlatoRobot extends AdvancedRobot {
 
   private double calculateOptimalFirePower() {
     if (currentState == null) {
-      return 1.0; // Default power
+      return DEFAULT_FIRE_POWER;
     }
 
     double bearingAbs = Math.abs(currentState.opponentBearing);
     double distanceEstimate;
     
-    if (bearingAbs > 90) {
-      distanceEstimate = 400;
-    } else if (bearingAbs > 45) {
-      distanceEstimate = 250;
+    if (bearingAbs > BEARING_THRESHOLD_FAR) {
+      distanceEstimate = DISTANCE_FAR;
+    } else if (bearingAbs > BEARING_THRESHOLD_MEDIUM) {
+      distanceEstimate = DISTANCE_MEDIUM;
     } else {
-      distanceEstimate = 100; 
+      distanceEstimate = DISTANCE_CLOSE; 
     }
     
     double firePower;
     
-    if (distanceEstimate < 150) {
-      firePower = Math.min(3.0, Math.max(1.5, currentState.opponentEnergy / 8.0));
-    } else if (distanceEstimate < 300) {
-      firePower = Math.min(2.5, Math.max(1.0, currentState.opponentEnergy / 12.0));
+    if (distanceEstimate < CLOSE_RANGE_THRESHOLD) {
+      firePower = Math.min(MAX_FIRE_POWER_CLOSE, Math.max(MIN_FIRE_POWER_CLOSE, currentState.opponentEnergy / CLOSE_ENERGY_DIVISOR));
+    } else if (distanceEstimate < MEDIUM_RANGE_THRESHOLD) {
+      firePower = Math.min(MAX_FIRE_POWER_MEDIUM, Math.max(MIN_FIRE_POWER_MEDIUM, currentState.opponentEnergy / MEDIUM_ENERGY_DIVISOR));
     } else {
-      firePower = Math.min(2.0, Math.max(0.5, currentState.opponentEnergy / 16.0));
+      firePower = Math.min(MAX_FIRE_POWER_FAR, Math.max(MIN_FIRE_POWER_FAR, currentState.opponentEnergy / FAR_ENERGY_DIVISOR));
     }
     
-    double energyBuffer = 2.0; 
-    double maxAffordablePower = Math.min(firePower, getEnergy() - energyBuffer);
+    double maxAffordablePower = Math.min(firePower, getEnergy() - ENERGY_BUFFER);
     
-    if (maxAffordablePower <= 0.1) {
-      return 0.1; 
+    if (maxAffordablePower <= MIN_FIRE_POWER) {
+      return MIN_FIRE_POWER; 
     }
     
-    if (getEnergy() < 20) {
-      maxAffordablePower *= 0.7; // Reduce power when energy is low
+    if (getEnergy() < LOW_ENERGY_THRESHOLD) {
+      maxAffordablePower *= LOW_ENERGY_POWER_MULTIPLIER;
     }
     
-    // Robocode fire power must be between 0.1 and 3.0
-    return Math.min(3.0, Math.max(0.1, maxAffordablePower));
+    return Math.min(MAX_FIRE_POWER, Math.max(MIN_FIRE_POWER, maxAffordablePower));
   }
 
   @Override
