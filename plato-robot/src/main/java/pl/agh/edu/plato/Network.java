@@ -31,8 +31,8 @@ public class Network {
 
   private static final Logger logger = LoggerFactory.getLogger(Network.class);
 
-  private static final int INPUT_NEURONS = 6;
-  private static final int OUTPUT_NEURONS = 6;
+  private static final int INPUT_NEURONS = 10;
+  private static final int OUTPUT_NEURONS = 12;
   private static final String MODEL_UPDATE_HEADER = "X-Model-Updates";
 
   private ZooModel<NDList, NDList> model;

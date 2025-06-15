@@ -6,17 +6,22 @@ server:
 rl:
   explorationEpsilonMax: 1.0
   explorationEpsilonMin: 0.01
-  explorationEpsilonDecrease: 0.002
+  explorationEpsilonDecrease: 0.0007
 
 timing:
-  networkReloadInterval: 1000
-  actionInterval: 10
+  actionInterval: 5
+  networkReloadInterval: 50
 
 rewards:
-  hitMultiplier: 5.0
-  survival: -0.2
-  aimedReady: 5.0
-  penaltyGotHitMultiplier: 3.0
-  penaltyHitWall: 5.0
-  penaltyDeath: 40.0
-  win: 50.0
+  survival: 0.02
+  hitMultiplier: 10.0
+  penaltyGotHitMultiplier: -10.0
+  penaltyHitWall: -4.0
+  standingStillPenalty: -0.2
+  approachEnemy: 0.1
+  retreatEnemyPenalty: -0.1
+  gunHeatPenalty: -1.0
+  aimedReady: 0.2
+  energyRetention: 0.01
+  win: 20.0
+  penaltyDeath: -20.0

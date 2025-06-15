@@ -24,13 +24,18 @@ public class RobotConfig {
   }
 
   public static class RewardsConfig {
-    public double hitMultiplier = 4.0;
-    public double survival = 0.01;
-    public double aimedReady = 0.1;
-    public double penaltyGotHitMultiplier = 1.0;
-    public double penaltyHitWall = 2.0;
-    public double penaltyDeath = 50.0;
-    public double win = 50.0;
+    public double survival = 0.02;
+    public double hitMultiplier = 10.0;
+    public double penaltyGotHitMultiplier = -10.0;
+    public double penaltyHitWall = -4.0;
+    public double standingStillPenalty = -0.2;
+    public double approachEnemy = 0.1;
+    public double retreatEnemyPenalty = -0.1;
+    public double gunHeatPenalty = -1.0;
+    public double aimedReady = 0.2;
+    public double energyRetention = 0.01;
+    public double win = 20.0;
+    public double penaltyDeath = -20.0;
   }
 
   public RobotConfig() {

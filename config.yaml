@@ -7,8 +7,8 @@ robocode:
   my_robot_name: "pl.agh.edu.plato.PlatoRobot*"
   opponents: ["sample.SittingDuck", "sample.Crazy"]
 
-  num_rounds: 3000
-  inactivity_time: 3000
+  num_rounds: 10000
+  inactivity_time: 4000
   gun_cooling_rate: 0.1
   battlefield_width: 800
   battlefield_height: 600
@@ -19,16 +19,16 @@ server:
   weight_port: 8001
   python_exe: "python3"
   script_name: "main.py"
-  state_dims: 6
-  actions: 6
-  hidden_dims: 32
-  learning_rate: 0.2
-  learning_rate_min: 0.01
-  learning_rate_decrease: 0.01
+  state_dims: 10
+  actions: 12
+  hidden_dims: 128
+  learning_rate: 0.01
+  learning_rate_min: 0.00001
+  learning_rate_decrease: 0.00002
   gamma: 0.99
   batch_size: 32
-  replay_capacity: 10000
-  save_frequency: 1000
+  replay_capacity: 20000
+  save_frequency: 600
   weights_file_name: "network_weights.onnx" # Default used by server.py
   device: "auto" # cpu, cuda, or auto
 

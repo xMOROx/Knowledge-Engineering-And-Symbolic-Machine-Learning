@@ -8,6 +8,7 @@ import pl.agh.edu.plato.config.ConfigLoader;
 import pl.agh.edu.plato.config.RobotConfig;
 import robocode.AdvancedRobot;
 import robocode.DeathEvent;
+import robocode.HitByBulletEvent;
 import robocode.HitWallEvent;
 import robocode.ScannedRobotEvent;
 import robocode.WinEvent;
@@ -63,24 +64,30 @@ public class PlatoRobot extends AdvancedRobot {
   static HyperparametersLoader hyperparametersLoader;
   private static double explorationEpsilon;
 
+  private double lastOpponentDistance = 0.0;
+  private long lastActionTime = 0;
 
   private enum Action {
-    FORWARD, BACKWARD, LEFT, RIGHT, FIRE, NOTHING;
+    FORWARD, BACKWARD, NOTHING,
+    FORWARD_LEFT, FORWARD_RIGHT,
+    BACKWARD_LEFT, BACKWARD_RIGHT,
+    FIRE, FIRE_POWER_LOW, FIRE_POWER_MEDIUM,
+    TURN_GUN_LEFT, TURN_GUN_RIGHT;
 
     public static Action fromInteger(int x) {
       switch (x) {
-        case 0:
-          return FORWARD;
-        case 1:
-          return BACKWARD;
-        case 2:
-          return LEFT;
-        case 3:
-          return RIGHT;
-        case 4:
-          return FIRE;
-        case 5:
-          return NOTHING;
+        case 0: return FORWARD;
+        case 1: return BACKWARD;
+        case 2: return NOTHING;
+        case 3: return FORWARD_LEFT;
+        case 4: return FORWARD_RIGHT;
+        case 5: return BACKWARD_LEFT;
+        case 6: return BACKWARD_RIGHT;
+        case 7: return FIRE;
+        case 8: return FIRE_POWER_LOW;
+        case 9: return FIRE_POWER_MEDIUM;
+        case 10: return TURN_GUN_LEFT;
+        case 11: return TURN_GUN_RIGHT;
         default:
           logger.warn("Invalid action index: {}", x);
           return NOTHING;
@@ -91,6 +98,13 @@ public class PlatoRobot extends AdvancedRobot {
   @Override
   public void run() {
     logger.info("--- RUN() METHOD STARTED ---");
+
+    int currentBattleNum = getBattleNum();
+    int currentRoundNum = getRoundNum();
+    int totalRounds = getNumRounds();
+
+    logger.info("Starting Battle #{} (Round {} of {})", currentBattleNum, currentRoundNum, totalRounds);
+
 
     try {
       this.config = ConfigLoader.loadConfig();
@@ -150,6 +164,7 @@ public class PlatoRobot extends AdvancedRobot {
 
       setAdjustGunForRobotTurn(true);
       setAdjustRadarForGunTurn(true);
+      setAdjustRadarForRobotTurn(true);
 
       while (!isRoundOver) {
         setTurnRadarRight(360);
@@ -227,6 +242,11 @@ public class PlatoRobot extends AdvancedRobot {
   }
 
   public void performAction() {
+    if (getTime() > lastActionTime && getVelocity() == 0 && Math.abs(getTurnRemaining()) < 0.1) {
+        rewardReceived -= config.rewards.standingStillPenalty;
+    }
+    lastActionTime = getTime();
+
     if (this.currentState == null) {
       logger.debug("Skipping action @ {}: currentState is null (waiting for first scan).", getTime());
       setTurnRadarRight(360);
@@ -236,10 +256,33 @@ public class PlatoRobot extends AdvancedRobot {
       logger.warn("Skipping action @ {}: network not available/loaded.", getTime());
       this.lastActionChosen = Action.NOTHING;
       this.rewardReceived = 0.0;
+      setAhead(0);
+      setTurnRight(0);
       return;
     }
 
     if (this.previousState != null && this.stateReporter != null) {
+      if (lastOpponentDistance > 0 && this.currentState.opponentDistance > 0) {
+          double distanceChange = lastOpponentDistance - this.currentState.opponentDistance;
+          if (distanceChange > 0) {
+              rewardReceived += distanceChange * config.rewards.approachEnemy;
+          } else if (distanceChange < 0) {
+              rewardReceived += distanceChange * config.rewards.retreatEnemyPenalty;
+          }
+      }
+      lastOpponentDistance = this.currentState.opponentDistance;
+
+      double gunTurnRemaining = getGunTurnRemainingRadians();
+      if (getGunHeat() == 0 && Math.abs(gunTurnRemaining) < Math.toRadians(2.0)) {
+          rewardReceived += config.rewards.aimedReady;
+      }
+
+      if (getGunHeat() > 0.5) {
+          rewardReceived += config.rewards.gunHeatPenalty;
+      }
+      rewardReceived += getEnergy() * config.rewards.energyRetention;
+
+
       logger.debug("Recording non-terminal transition @ {} for Action: {}, Reward: {}",
           getTime(), this.lastActionChosen, this.rewardReceived);
       this.stateReporter.recordTransition(this.previousState, this.lastActionChosen.ordinal(),
@@ -251,9 +294,14 @@ public class PlatoRobot extends AdvancedRobot {
     double[] inputs = {
         (double) this.currentState.agentSpeed,
         (double) this.currentState.agentEnergy,
-        (double) this.currentState.agentX, (double) this.currentState.agentY,
+        (double) this.currentState.agentX,
+        (double) this.currentState.agentY,
+        (double) this.currentState.agentHeading,
+        (double) this.currentState.gunHeading,
         (double) this.currentState.opponentBearing,
-        (double) this.currentState.opponentEnergy
+        (double) this.currentState.opponentDistance,
+        (double) this.currentState.opponentEnergy,
+        (double) this.currentState.opponentHeading
     };
 
     double[] qValues = this.network.evaluate(inputs);
@@ -293,24 +341,50 @@ public class PlatoRobot extends AdvancedRobot {
       case BACKWARD:
         setBack(100);
         break;
-      case LEFT:
-        setTurnLeft(15);
+      case FORWARD_LEFT:
+        setTurnLeft(20);
+        setAhead(50);
         break;
-      case RIGHT:
-        setTurnRight(15);
+      case FORWARD_RIGHT:
+        setTurnRight(20);
+        setAhead(50);
+        break;
+      case BACKWARD_LEFT:
+        setTurnLeft(20);
+        setBack(50);
+        break;
+      case BACKWARD_RIGHT:
+        setTurnRight(20);
+        setBack(50);
         break;
       case FIRE:
         if (getGunHeat() == 0 && getEnergy() > 0.1) {
-          double firePower = calculateOptimalFirePower();
-          setFire(firePower);
-          logger.debug("Firing with power: {}", firePower);
+          setFire(calculateOptimalFirePower());
         } else {
-          logger.debug("Action FIRE chosen, but gun hot/low energy. Skipping fire.");
+        }
+        break;
+      case TURN_GUN_LEFT:
+        setTurnGunLeft(15);
+        break;
+      case TURN_GUN_RIGHT:
+        setTurnGunRight(15);
+        break;
+      case FIRE_POWER_LOW:
+        if (getGunHeat() == 0 && getEnergy() > 0.1) {
+            setFire(1.0);
+        } else {
+        }
+        break;
+      case FIRE_POWER_MEDIUM:
+        if (getGunHeat() == 0 && getEnergy() > 0.1) {
+            setFire(2.0);
+        } else {
         }
         break;
       case NOTHING:
         setAhead(0);
         setTurnRight(0);
+        setTurnGunRight(0);
         break;
     }
 
@@ -321,49 +395,38 @@ public class PlatoRobot extends AdvancedRobot {
     logger.debug("Action {} queued. Shifted states. Waiting for next scan.", this.lastActionChosen);
   }
 
-  private double calculateOptimalFirePower() {
-    if (currentState == null) {
-      return DEFAULT_FIRE_POWER;
+    private double calculateOptimalFirePower() {
+    if (currentState == null || getGunHeat() > 0 || getEnergy() < 0.1) {
+      return 0.0;
     }
 
-    double bearingAbs = Math.abs(currentState.opponentBearing);
-    double distanceEstimate;
-    
-    if (bearingAbs > BEARING_THRESHOLD_FAR) {
-      distanceEstimate = DISTANCE_FAR;
-    } else if (bearingAbs > BEARING_THRESHOLD_MEDIUM) {
-      distanceEstimate = DISTANCE_MEDIUM;
+    if (currentState.opponentDistance < 150) {
+        return Math.min(3.0, getEnergy() - 0.5);
+    } else if (currentState.opponentDistance < 300) {
+        return Math.min(2.0, getEnergy() - 0.5);
     } else {
-      distanceEstimate = DISTANCE_CLOSE; 
+        return Math.min(1.0, getEnergy() - 0.5);
     }
-    
-    double firePower;
-    
-    if (distanceEstimate < CLOSE_RANGE_THRESHOLD) {
-      firePower = Math.min(MAX_FIRE_POWER_CLOSE, Math.max(MIN_FIRE_POWER_CLOSE, currentState.opponentEnergy / CLOSE_ENERGY_DIVISOR));
-    } else if (distanceEstimate < MEDIUM_RANGE_THRESHOLD) {
-      firePower = Math.min(MAX_FIRE_POWER_MEDIUM, Math.max(MIN_FIRE_POWER_MEDIUM, currentState.opponentEnergy / MEDIUM_ENERGY_DIVISOR));
-    } else {
-      firePower = Math.min(MAX_FIRE_POWER_FAR, Math.max(MIN_FIRE_POWER_FAR, currentState.opponentEnergy / FAR_ENERGY_DIVISOR));
-    }
-    
-    double maxAffordablePower = Math.min(firePower, getEnergy() - ENERGY_BUFFER);
-    
-    if (maxAffordablePower <= MIN_FIRE_POWER) {
-      return MIN_FIRE_POWER; 
-    }
-    
-    if (getEnergy() < LOW_ENERGY_THRESHOLD) {
-      maxAffordablePower *= LOW_ENERGY_POWER_MULTIPLIER;
-    }
-    
-    return Math.min(MAX_FIRE_POWER, Math.max(MIN_FIRE_POWER, maxAffordablePower));
   }
 
   @Override
   public void onScannedRobot(ScannedRobotEvent event) {
+    if (this.currentState != null) {
+        lastOpponentDistance = this.currentState.opponentDistance;
+    }
+
     State newState = new State(
-        (float) getVelocity(), (float) getEnergy(), (float) getX(), (float) getY(), (float) event.getBearing(), (float) event.getEnergy());
+        (float) getVelocity(),
+        (float) getEnergy(),
+        (float) getX(),
+        (float) getY(),
+        (float) getHeading(),
+        (float) getGunHeading(),
+        (float) event.getBearing(),
+        (float) event.getDistance(),
+        (float) event.getEnergy(),
+        (float) event.getHeading()
+    );
     this.currentState = newState;
 
     double reward = 0.0;
@@ -404,6 +467,12 @@ public class PlatoRobot extends AdvancedRobot {
   }
 
   @Override
+  public void onHitByBullet(HitByBulletEvent event) {
+      logger.debug("--- ONHITBYBULLET EVENT at time {} ---", getTime());
+      this.rewardReceived -= config.rewards.penaltyGotHitMultiplier * event.getPower();
+  }
+
+  @Override
   public void onHitWall(HitWallEvent event) {
     logger.debug("--- ONHITWALL EVENT at time {} ---", getTime());
     this.rewardReceived -= config.rewards.penaltyHitWall;
@@ -421,7 +490,11 @@ public class PlatoRobot extends AdvancedRobot {
       } else if (this.previousState != null) {
         finalState = this.previousState;
       } else {
-        finalState = new State((float) getVelocity(), (float) getEnergy(),(float) getX(), (float) getY(), 0.0f, 0.0f);
+        finalState = new State(
+            (float) getVelocity(), (float) getEnergy(), (float) getX(), (float) getY(),
+            (float) getHeading(), (float) getGunHeading(),
+            0.0f, 0.0f, 0.0f, 0.0f
+        );
         logger.warn("Using fallback final state in onDeath.");
       }
     } catch (Exception e) {
@@ -460,7 +533,11 @@ public class PlatoRobot extends AdvancedRobot {
       } else if (this.previousState != null) {
         finalState = this.previousState;
       } else {
-        finalState = new State((float) getVelocity(), (float) getEnergy(),(float) getX(), (float) getY(), 0.0f, 0.0f);
+        finalState = new State(
+            (float) getVelocity(), (float) getEnergy(), (float) getX(), (float) getY(),
+            (float) getHeading(), (float) getGunHeading(),
+            0.0f, 0.0f, 0.0f, 0.0f
+        );
         logger.warn("Using fallback final state in onWin.");
       }
     } catch (Exception e) {
