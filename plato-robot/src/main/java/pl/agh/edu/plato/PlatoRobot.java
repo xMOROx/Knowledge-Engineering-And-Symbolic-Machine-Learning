@@ -438,6 +438,8 @@ public class PlatoRobot extends AdvancedRobot {
         double actualEnergyChange = opponentEnergyChangeScaled * 10.0;
         double hitReward = actualEnergyChange * config.rewards.hitMultiplier;
         reward += hitReward;
+        logger.debug("Reward Calc @ {}: Opponent Hit! ScaledDelta={}, Reward+={}", getTime(),
+            opponentEnergyChangeScaled, hitReward);
       }
 
       double selfEnergyChangeScaled = newState.agentEnergy - this.previousState.agentEnergy;
@@ -445,6 +447,8 @@ public class PlatoRobot extends AdvancedRobot {
         double actualEnergyLost = -selfEnergyChangeScaled * 10.0;
         double hitPenalty = -actualEnergyLost * config.rewards.penaltyGotHitMultiplier;
         reward += hitPenalty;
+        logger.debug("Reward Calc @ {}: Got Hit! ScaledDelta={}, Reward+={}", getTime(),
+            selfEnergyChangeScaled, hitPenalty);
       }
     }
 
@@ -472,6 +476,8 @@ public class PlatoRobot extends AdvancedRobot {
   public void onHitWall(HitWallEvent event) {
     logger.debug("--- ONHITWALL EVENT at time {} ---", getTime());
     this.rewardReceived -= config.rewards.penaltyHitWall;
+    logger.debug("Hit wall penalty applied (-{}). Current rewardReceived = {}",
+        config.rewards.penaltyHitWall, this.rewardReceived);
   }
 
   @Override
